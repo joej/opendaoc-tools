@@ -1,0 +1,30 @@
+# Secrets / credentials — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.yml
+*-secret*
+
+# Server/account data, captures (plaintext logins on the wire)
+*.capture
+*.pcap
+captures/
+
+# Build output / deps
+bin/
+obj/
+dist/
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+publish/
