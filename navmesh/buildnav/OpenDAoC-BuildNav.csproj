@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Cross-platform build of OpenDAoC-BuildNav (Linux, macOS, Windows).
+
+      dotnet build -c Release -p:CoreDir=/path/to/OpenDAoC-Core
+
+    CoreDir is an OpenDAoC-Core checkout; the shared Detour P/Invoke layer is referenced from
+    $(CoreDir)/Pathing/Detour.Managed. Defaults to a sibling folder named OpenDAoC-Core.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>OpenDAoC_BuildNav</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <EnableLibraryImportGenerator>true</EnableLibraryImportGenerator>
+    <CoreDir Condition="'$(CoreDir)' == ''">$(MSBuildThisFileDirectory)../OpenDAoC-Core</CoreDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Program.cs reads these from the folder above base/, i.e. next to the program. -->
+    <None Include="ignorelist.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Only OpenTK's math and colour types are used (Vector*, Matrix4, Color4). BuildNav ships a
+         copied OpenTK.dll (1.1.1475); this takes the nearest release on nuget.org instead. Later 1.1
+         releases renamed the blend-factor enums NiAlphaProperty uses. The package targets .NET
+         Framework (NU1701); the math types work unchanged on .NET 10. -->
+    <PackageReference Include="OpenTK" Version="1.1.1508.5724" NoWarn="NU1701" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="$(CoreDir)/Pathing/Detour.Managed/Detour.Managed.csproj" />
+  </ItemGroup>
+
+  <Target Name="CopyBaseFolder" AfterTargets="Build">
+    <ItemGroup>
+      <BaseFiles Include="$(ProjectDir)base/**/*" />
+    </ItemGroup>
+    <MakeDir Directories="$(TargetDir)base" />
+    <Copy SourceFiles="@(BaseFiles)" DestinationFolder="$(TargetDir)base/%(RecursiveDir)" />
+  </Target>
+
+</Project>

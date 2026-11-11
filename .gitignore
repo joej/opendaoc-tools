@@ -28,3 +28,9 @@ venv/
 .DS_Store
 *.swp
 publish/
+
+# Script compile-check output
+build/
+
+# Session hand-offs and private notes (host names, local paths)
+private/

@@ -8,9 +8,15 @@ server. The pieces here aim to be generic instead: they work against any
 OpenDAoC server given its address and your credentials, because OpenDAoC accounts are per-server
 (there is no central account system).
 
+## Contents so far
+
+- [`navmesh/`](navmesh/) — building OpenDAoC navmeshes on Linux and macOS without BuildNav's
+  Windows-only `RecastDemo.exe`, plus tools to check `.nav` files. Start with
+  [its README](navmesh/README.md).
+
 ## Planned contents
 
-Nothing is built yet — this repository is the home for the following, added as they're written:
+This repository is the home for the following, added as they're written:
 
 - **Account / user management** — create and manage accounts deliberately, for a server run with
   auto-account-creation turned off.

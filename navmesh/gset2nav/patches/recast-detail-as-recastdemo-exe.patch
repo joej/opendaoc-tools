@@ -1,0 +1,55 @@
+Make Recast's detail-mesh arithmetic match BuildNav's RecastDemo.exe.
+
+Upstream's Windows RecastDemo project builds with /fp:fast (RecastDemo/premake5.lua), and MSVC
+rewrote three float expressions in buildPolyDetail. The disassembly of the exe shows the forms
+below; each line here is the exe's arithmetic, in strict IEEE float. The first two change zone 0's
+detail meshes. The jitter form makes no difference there, but it is what the exe computes.
+
+diff --git a/Recast/Source/RecastMeshDetail.cpp b/Recast/Source/RecastMeshDetail.cpp
+index 40d350f..f9d05f9 100644
+--- a/Recast/Source/RecastMeshDetail.cpp
++++ b/Recast/Source/RecastMeshDetail.cpp
+@@ -106,13 +106,16 @@ static float distPtTri(const float* p, const float* a, const float* b, const flo
+ 	const float dot12 = vdot2(v1, v2);
+ 	
+ 	// Compute barycentric coordinates
+-	const float invDenom = 1.0f / (dot00 * dot11 - dot01 * dot01);
+-	const float u = (dot11 * dot02 - dot01 * dot12) * invDenom;
+-	float v = (dot00 * dot12 - dot01 * dot02) * invDenom;
++	// gset2nav: divide each numerator, and test (unum+vnum)/denom, as RecastDemo.exe does.
++	const float denom = dot00 * dot11 - dot01 * dot01;
++	const float unum = dot11 * dot02 - dot01 * dot12;
++	const float vnum = dot00 * dot12 - dot01 * dot02;
++	const float u = unum / denom;
++	float v = vnum / denom;
+ 	
+ 	// If point lies inside the triangle, return interpolated y-coord.
+ 	static const float EPS = 1e-4f;
+-	if (u >= -EPS && v >= -EPS && (u+v) <= 1+EPS)
++	if (u >= -EPS && v >= -EPS && (unum + vnum) / denom <= 1+EPS)
+ 	{
+ 		const float y = a[1] + v0[1]*u + v1[1]*v;
+ 		return fabsf(y-p[1]);
+@@ -728,7 +731,8 @@ static bool buildPolyDetail(rcContext* ctx, const float* in, const int nin,
+ 			float dy = vi[1] - vj[1];
+ 			float dz = vi[2] - vj[2];
+ 			float d = sqrtf(dx*dx + dz*dz);
+-			int nn = 1 + (int)floorf(d/sampleDist);
++			// gset2nav: multiply by the reciprocal, as RecastDemo.exe does.
++			int nn = 1 + (int)floorf(d*(1.0f/sampleDist));
+ 			if (nn >= MAX_VERTS_PER_EDGE) nn = MAX_VERTS_PER_EDGE-1;
+ 			if (nverts+nn >= MAX_VERTS)
+ 				nn = MAX_VERTS-1-nverts;
+@@ -875,9 +879,10 @@ static bool buildPolyDetail(rcContext* ctx, const float* in, const int nin,
+ 				float pt[3];
+ 				// The sample location is jittered to get rid of some bad triangulations
+ 				// which are cause by symmetrical data from the grid structure.
+-				pt[0] = s[0]*sampleDist + getJitterX(i)*cs*0.1f;
++				// gset2nav: (j/65535*2-1)*cs*0.1 folded to (j*C-0.1)*cs, as RecastDemo.exe does.
++				pt[0] = s[0]*sampleDist + ((float)((i * 0x8da6b343) & 0xffff)*3.05180447e-06f - 0.1f)*cs;
+ 				pt[1] = s[1]*chf.ch;
+-				pt[2] = s[2]*sampleDist + getJitterY(i)*cs*0.1f;
++				pt[2] = s[2]*sampleDist + ((float)((i * 0xd8163841) & 0xffff)*3.05180447e-06f - 0.1f)*cs;
+ 				float d = distToTriMesh(pt, verts, nverts, &tris[0], static_cast<int>(tris.size()) / 4);
+ 				if (d < 0) continue; // did not hit the mesh.
+ 				if (d > bestd)
