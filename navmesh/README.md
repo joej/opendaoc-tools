@@ -30,12 +30,12 @@ navmeshes on Linux and macOS, from the game client's files. Nothing here needs W
 
 | Piece | State |
 |---|---|
-| `gset2nav` | Built and tested on macOS (Apple Silicon). **Its output is byte-identical to BuildNav's `RecastDemo.exe` on Windows for the same input**, apart from unused padding. Tested on zone 0 (Camelot Hills, 827 702 triangles, 45 796 tiles, ladder links included) and on two synthetic scenes. Output loads fully with the server's `LoadNavMesh`. Single- and multi-threaded output is identical. |
+| `gset2nav` | Built and tested on macOS (Apple Silicon). **Its output is byte-identical to BuildNav's `RecastDemo.exe` on Windows for the same input**, apart from unused padding. Tested on six real zones (outdoor zones in two realms, a capital city, a sky city, a small and a large dungeon; ladder links included) and on two synthetic scenes. Output loads fully with the server's `LoadNavMesh`. Single- and multi-threaded output is identical. |
 | `navcheck.py`, `navload` | Tested on good, truncated, wrong-magic and old 32-bit files. |
-| `buildnav` port | Built and run on macOS (Apple Silicon) for zone 0, Camelot Hills, reading the client from a network share: 2 min 24 s including both ladder passes. Result: 45 796 tiles, 80 363 polygons, 174 ladder links. All tiles load with the server's `LoadNavMesh`, and queries find the mesh. Not yet run on Linux. |
-| Real zones match the Windows build | **Stage 2 matches on zone 0.** `RecastDemo.exe` and `gset2nav` built the same `.gset` into byte-identical files. Not compared yet: stage 1 (the geometry export, which would need stock BuildNav on Windows) and other zones. |
+| `buildnav` port | Built and run on macOS (Apple Silicon), reading the client from a network share. All zones of a retail client (`--all`): 448 `.nav` files in about 65 minutes on 8 cores. Every file passes `navcheck` and loads every tile with the server's `LoadNavMesh`. Zones rebuilt one at a time match the full run. Not yet run on Linux. |
+| Real zones match the Windows build | **Stage 2 matches on all six zones compared**: 0 (Camelot Hills), 100 (outdoor, Midgard), 120 (Jordheim), 066 (a sky city), 244 and 302 (dungeons). `RecastDemo.exe` and `gset2nav` built the same `.gset` files into tile-for-tile identical meshes. Not compared yet: stage 1 (the geometry export, which would need stock BuildNav on Windows). |
 
-The steps below have been run end to end on macOS for one zone. Linux and other zones are still
+The steps below have been run end to end on macOS for every zone of a retail client. Linux is still
 to be checked.
 
 ## 1. Check what your server has now

@@ -191,8 +191,13 @@ would find them, and the fix would be the same kind of change.
 With those changes, **all 45 796 tiles are byte-identical**. The whole 33 MB file is identical
 apart from the per-tile padding bytes, and the server's `LoadNavMesh` loads every tile.
 
-Not covered yet: other zones (dungeons, cities, other realms) and stage 1, the C# geometry export.
-For zone 0 the exe was given the macOS export, so the comparison tests stage 2 only.
+Five more zones were then compared the same way, chosen to cover each kind of zone BuildNav
+exports: 100 (outdoor, Midgard), 120 (Jordheim, a capital city), 066 (Albion's Underground Forest,
+a sky city), 244 (Passage of Conflict, a large dungeon) and 302 (Damp Cavern, a small dungeon).
+All five are tile-for-tile identical, with no further changes needed.
+
+Not covered yet: stage 1, the C# geometry export. The exe was given the macOS export each time,
+so these comparisons test stage 2 only.
 
 ## What this means
 
