@@ -120,13 +120,12 @@ namespace CEM.Client {
         }
       }
 
-      // Return early if the file does not exist
-      if (!File.Exists(fileSystemPath)) {
-        // The client's folders are mixed case (Nifs, Dnifs, TerrainTex) and these paths are
-        // lowercased: fine on Windows and macOS, not on a case-sensitive Linux filesystem.
-        fileSystemPath = ResolveCaseInsensitive(fileSystemPath);
-        if (fileSystemPath == null || !File.Exists(fileSystemPath)) return null;
-      }
+      // The client's folders and files are mixed case (Nifs, Dnifs, BogHall1.npk) and these paths
+      // are lowercased. Always resolve against the real directory listings: a case-sensitive
+      // filesystem won't find the lowercased name, and an SMB share mounted on macOS answers
+      // wrong-case names inconsistently (zones/DNIFS found, zones/dnifs not).
+      fileSystemPath = ResolveCaseInsensitive(fileSystemPath);
+      if (fileSystemPath == null || !File.Exists(fileSystemPath)) return null;
 
       // If this is a nif, look inside to find the file
       if (nifPath != null) {
@@ -202,51 +201,50 @@ namespace CEM.Client {
     /// <returns></returns>
     public static IEnumerable<string> FindFiles(string dir, string pattern) {
       string full = Path.Combine(GamePath, dir);
-      if (!Directory.Exists(full))
-        full = ResolveCaseInsensitive(full) ?? full;
+      full = ResolveCaseInsensitive(full) ?? full;
       var options = new EnumerationOptions { MatchCasing = MatchCasing.CaseInsensitive, RecurseSubdirectories = false };
       return Directory.GetFiles(full, pattern, options)
           .Select(x => x[GamePath.Length..]);
     }
 
-    private static readonly Dictionary<string, string> _caseCache = new(StringComparer.Ordinal);
+    // Directory (as found on disk) -> its entries, keyed ignoring case.
+    private static readonly Dictionary<string, Dictionary<string, List<string>>> _dirIndex = new(StringComparer.Ordinal);
+
+    private static Dictionary<string, List<string>> ListDirectory(string dir) {
+      lock (_dirIndex) {
+        if (_dirIndex.TryGetValue(dir, out var cached))
+          return cached;
+      }
+      var index = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+      if (!Directory.Exists(dir))
+        return index; // not cached: dir is a name read from a listing, so this is a real miss or an I/O hiccup
+      foreach (string entry in Directory.EnumerateFileSystemEntries(dir)) {
+        string name = Path.GetFileName(entry);
+        if (!index.TryGetValue(name, out var names))
+          index[name] = names = new List<string>();
+        names.Add(name);
+      }
+      lock (_dirIndex)
+        _dirIndex[dir] = index;
+      return index;
+    }
 
     /// <summary>
     /// Finds an existing file or folder under GamePath whose path matches ignoring case, or null.
+    /// Each step uses a name read from the directory listing, never the name as given.
     /// </summary>
     private static string ResolveCaseInsensitive(string fullPath) {
-      lock (_caseCache) {
-        if (_caseCache.TryGetValue(fullPath, out string cached))
-          return cached;
-      }
-      string root = Path.GetFullPath(GamePath);
+      string root = Path.GetFullPath(GamePath).TrimEnd(Path.DirectorySeparatorChar);
       string target = Path.GetFullPath(fullPath);
-      string result = null;
-      if (target.StartsWith(root, StringComparison.Ordinal)) {
-        string current = root;
-        bool found = true;
-        foreach (string part in target[root.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries)) {
-          string exact = Path.Combine(current, part);
-          if (File.Exists(exact) || Directory.Exists(exact)) {
-            current = exact;
-            continue;
-          }
-          string match = Directory.Exists(current)
-              ? Directory.EnumerateFileSystemEntries(current)
-                  .FirstOrDefault(e => string.Equals(Path.GetFileName(e), part, StringComparison.OrdinalIgnoreCase))
-              : null;
-          if (match == null) {
-            found = false;
-            break;
-          }
-          current = match;
-        }
-        if (found)
-          result = current;
+      if (!target.StartsWith(root, StringComparison.Ordinal))
+        return null;
+      string current = root;
+      foreach (string part in target[root.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries)) {
+        if (!ListDirectory(current).TryGetValue(part, out var names))
+          return null;
+        current = Path.Combine(current, names.Contains(part) ? part : names[0]);
       }
-      lock (_caseCache)
-        _caseCache[fullPath] = result;
-      return result;
+      return current;
     }
   }
 }

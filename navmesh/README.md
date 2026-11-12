@@ -104,7 +104,10 @@ cmake --build build/navload
 
 BuildNav uses native Detour too, for placing ladders. Copy the library from step 2 into the
 BuildNav build's `base/lib/` folder, which is next to the `OpenDAoC-BuildNav` program in
-`navmesh/buildnav/bin/Release/net10.0/`. Use the same file name as in the table.
+`navmesh/buildnav/bin/Release/net10.0/`. Use the same file name as in the table. The library and
+`CoreDir` must come from the same OpenDAoC-Core checkout: if you update one, rebuild the other.
+Otherwise the ladder pass fails with `Unable to find an entry point named ...` and the zone is
+built without ladder links.
 
 On macOS, if CMake stops with `tapi error: malformed file ... unknown architecture` or asks you to
 agree to the Xcode licence, build with the Command Line Tools instead of Xcode. Put
