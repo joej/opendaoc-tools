@@ -40,7 +40,17 @@ namespace CEM
                 return;
 
             if (!Arguments.NormalPriority)
-                Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.BelowNormal;
+            {
+                // BelowNormal is nice 10 on Linux and macOS. Under a higher nice value (e.g. started
+                // with `nice -n 19`) that would raise the priority, which needs root; keep the lower one.
+                try
+                {
+                    Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.BelowNormal;
+                }
+                catch (System.ComponentModel.Win32Exception)
+                {
+                }
+            }
 
             // Load the config file
             if (!string.IsNullOrEmpty(Arguments.DaocRoot))

@@ -30,13 +30,12 @@ navmeshes on Linux and macOS, from the game client's files. Nothing here needs W
 
 | Piece | State |
 |---|---|
-| `gset2nav` | Built and tested on macOS (Apple Silicon). **Its output is byte-identical to BuildNav's `RecastDemo.exe` on Windows for the same input**, apart from unused padding. Tested on six real zones (outdoor zones in two realms, a capital city, a sky city, a small and a large dungeon; ladder links included) and on two synthetic scenes. Output loads fully with the server's `LoadNavMesh`. Single- and multi-threaded output is identical. |
+| `gset2nav` | Built and tested on macOS (Apple Silicon) and Linux (x86-64, GCC 13). **Its output is byte-identical to BuildNav's `RecastDemo.exe` on Windows for the same input**, apart from unused padding. Tested on six real zones (outdoor zones in two realms, a capital city, a sky city, a small and a large dungeon; ladder links included) and on two synthetic scenes. Output loads fully with the server's `LoadNavMesh`. Single- and multi-threaded output is identical. |
 | `navcheck.py`, `navload` | Tested on good, truncated, wrong-magic and old 32-bit files. |
-| `buildnav` port | Built and run on macOS (Apple Silicon), reading the client from a network share. All zones of a retail client (`--all`): 448 `.nav` files in about 65 minutes on 8 cores. Every file passes `navcheck` and loads every tile with the server's `LoadNavMesh`. Zones rebuilt one at a time match the full run. Not yet run on Linux. |
-| Real zones match the Windows build | **Stage 2 matches on all six zones compared**: 0 (Camelot Hills), 100 (outdoor, Midgard), 120 (Jordheim), 066 (a sky city), 244 and 302 (dungeons). `RecastDemo.exe` and `gset2nav` built the same `.gset` files into tile-for-tile identical meshes. Not compared yet: stage 1 (the geometry export, which would need stock BuildNav on Windows). |
+| `buildnav` port | Run on every zone of a retail client (`--all`, 448 `.nav` files) on macOS (Apple Silicon, client on a network share, about 65 minutes on 8 cores) and on Linux (x86-64, GCC, client on local disk, 28 minutes on 32 cores). The two sets are byte-identical. Every file passes `navcheck` and loads every tile with the server's `LoadNavMesh`. Zones rebuilt one at a time match the full run. |
+| Real zones match the Windows build | **Stage 2 matches on all six zones compared**: 0 (Camelot Hills), 100 (outdoor, Midgard), 120 (Jordheim), 066 (a sky city), 244 and 302 (dungeons). `RecastDemo.exe` and `gset2nav` (on macOS and on Linux) built the same `.gset` files into tile-for-tile identical meshes. Not compared yet: stage 1 (the geometry export, which would need stock BuildNav on Windows). |
 
-The steps below have been run end to end on macOS for every zone of a retail client. Linux is still
-to be checked.
+The steps below have been run end to end, for every zone of a retail client, on macOS and on Linux.
 
 ## 1. Check what your server has now
 
@@ -76,8 +75,8 @@ Copy the result into the server's `lib/` folder:
 | macOS | `build/libDetour.dylib` | `lib/libDetour.so` (the server only looks for `.so`; the extension doesn't matter to the OS loader) |
 | Windows | `build/Release/Detour.dll` | `lib/Detour.dll` |
 
-On macOS, use `cp -L` because `libDetour.dylib` is a symlink. The renamed `.dylib` was checked to
-load and read a navmesh.
+Use `cp -L`: on Linux and macOS the built file is a symlink (`libDetour.so -> libDetour.so.VERSION`).
+On macOS, the renamed `.dylib` was checked to load and read a navmesh.
 
 ## 3. Build the tools
 
@@ -102,12 +101,24 @@ cmake -S navmesh/tools/navload -B build/navload -DOPENDAOC_CORE=/path/to/OpenDAo
 cmake --build build/navload
 ```
 
-BuildNav uses native Detour too, for placing ladders. Copy the library from step 2 into the
-BuildNav build's `base/lib/` folder, which is next to the `OpenDAoC-BuildNav` program in
-`navmesh/buildnav/bin/Release/net10.0/`. Use the same file name as in the table. The library and
-`CoreDir` must come from the same OpenDAoC-Core checkout: if you update one, rebuild the other.
-Otherwise the ladder pass fails with `Unable to find an entry point named ...` and the zone is
-built without ladder links.
+BuildNav uses native Detour too, for placing ladders. Build a copy of the library for it with
+`-ffp-contract=off`, and put it in a `base/lib/` folder next to the `OpenDAoC-BuildNav` program:
+
+```bash
+cmake -S /path/to/OpenDAoC-Core/Pathing/Detour -B build/detour -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CXX_FLAGS=-ffp-contract=off
+cmake --build build/detour
+mkdir -p navmesh/buildnav/bin/Release/net10.0/base/lib
+cp -L build/detour/libDetour.so navmesh/buildnav/bin/Release/net10.0/base/lib/      # Linux
+cp -L build/detour/libDetour.dylib navmesh/buildnav/bin/Release/net10.0/base/lib/libDetour.so  # macOS
+```
+
+Without the flag, Clang on Apple Silicon fuses multiply-adds, which now and then moves a ladder
+endpoint by a tenth of a unit. With it, macOS and Linux builds are byte-identical.
+
+The library and `CoreDir` must come from the same OpenDAoC-Core checkout: if you update one,
+rebuild the other. Otherwise the ladder pass fails with `Unable to find an entry point named ...`
+and the zone is built without ladder links.
 
 On macOS, if CMake stops with `tapi error: malformed file ... unknown architecture` or asks you to
 agree to the Xcode licence, build with the Command Line Tools instead of Xcode. Put
@@ -126,6 +137,9 @@ cd navmesh/buildnav/bin/Release/net10.0
     --recast=/path/to/build/gset2nav/gset2nav --zones=0,100,200
 ```
 
+- If .NET is installed in your home folder (`dotnet-install.sh`, e.g. `~/.dotnet`) rather than
+  system-wide, the program stops with "You must install .NET to run this application". Set
+  `DOTNET_ROOT=~/.dotnet` first.
 - `--zones=` takes a list of zone IDs, `--regions=` a list of region IDs, and `--all` builds
   every zone. Start with a few zones. A full build takes hours and a lot of memory.
 - `--obj` stops after the geometry (`.obj`, `.gset`, `.ladders.json`). To build the navmesh from

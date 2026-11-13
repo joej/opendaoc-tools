@@ -203,7 +203,11 @@ namespace CEM.Client {
       string full = Path.Combine(GamePath, dir);
       full = ResolveCaseInsensitive(full) ?? full;
       var options = new EnumerationOptions { MatchCasing = MatchCasing.CaseInsensitive, RecurseSubdirectories = false };
+      // Directory listings come back in the file system's order: sorted on NTFS, but in hash order
+      // on ext4 or ZFS. The order models are added in changes the navmesh, so sort the way NTFS
+      // lists names (ordinal, ignoring case), as BuildNav sees them on Windows.
       return Directory.GetFiles(full, pattern, options)
+          .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
           .Select(x => x[GamePath.Length..]);
     }
 

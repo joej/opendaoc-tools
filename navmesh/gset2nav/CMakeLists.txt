@@ -21,7 +21,9 @@ include(FetchContent)
 FetchContent_Declare(recastnavigation
   GIT_REPOSITORY https://github.com/recastnavigation/recastnavigation.git
   GIT_TAG        f25a3c3384f27eafdb53f28434d38834bc813ef5  # main, 2025-05-06
-  PATCH_COMMAND  git apply --whitespace=nowarn ${CMAKE_CURRENT_SOURCE_DIR}/patches/recast-detail-as-recastdemo-exe.patch
+  # The patch step runs again whenever the project is re-configured, so start from clean sources.
+  PATCH_COMMAND  git checkout -- .
+         COMMAND git apply --whitespace=nowarn ${CMAKE_CURRENT_SOURCE_DIR}/patches/recast-detail-as-recastdemo-exe.patch
 )
 set(RECASTNAVIGATION_DEMO     OFF CACHE BOOL "" FORCE)
 set(RECASTNAVIGATION_TESTS    OFF CACHE BOOL "" FORCE)
@@ -52,12 +54,19 @@ foreach(t gset2nav Recast Detour)
 endforeach()
 
 # Sort ties the way the Microsoft C runtime does, so the tiles match RecastDemo.exe's
-# (see src/msvc_qsort.cpp). Recast's and Detour's qsort calls are renamed at compile time;
-# msvc_qsort.cpp itself is compiled without the rename.
-target_compile_definitions(Recast PRIVATE qsort=gset2nav_qsort)
-target_compile_definitions(Detour PRIVATE qsort=gset2nav_qsort)
+# (see src/msvc_qsort.cpp). Recast's and Detour's qsort calls are renamed by a force-included
+# header (src/qsort_rename.h); msvc_qsort.cpp itself is compiled without it. A plain
+# -Dqsort=... would also rename the declarations in libstdc++'s <cstdlib> and fail to compile.
+set(QSORT_RENAME ${CMAKE_CURRENT_SOURCE_DIR}/src/qsort_rename.h)
+if(MSVC)
+  set(QSORT_RENAME_OPTS /FI${QSORT_RENAME})
+else()
+  set(QSORT_RENAME_OPTS -include ${QSORT_RENAME})
+endif()
+target_compile_options(Recast PRIVATE ${QSORT_RENAME_OPTS})
+target_compile_options(Detour PRIVATE ${QSORT_RENAME_OPTS})
 set_source_files_properties(${DEMO_SRC}/Source/ChunkyTriMesh.cpp
-  PROPERTIES COMPILE_DEFINITIONS qsort=gset2nav_qsort)
+  PROPERTIES COMPILE_OPTIONS "${QSORT_RENAME_OPTS}")
 add_library(gset2nav_sort STATIC src/msvc_qsort.cpp)
 if(NOT MSVC)
   target_compile_options(gset2nav_sort PRIVATE -ffp-contract=off)
