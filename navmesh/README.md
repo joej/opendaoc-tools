@@ -162,6 +162,21 @@ mkdir -p /path/to/server/pathing
 cp base/zones/zone*.nav /path/to/server/pathing/
 ```
 
+BuildNav skips the Trials of Atlantis zones 30–47 and 130–147, which the client marks as proxies
+of zones 73–90 (same geometry, same position in their region). The server still looks for their
+own files, so give them copies:
+
+```bash
+cd /path/to/server/pathing
+for p in $(seq 30 47) $(seq 130 147); do
+  cp "$(printf zone%03d.nav $((p % 100 + 43)))" "$(printf zone%03d.nav $p)"
+done
+```
+
+Each proxy zone has the same region offset and size as its source in the client's `zones.dat` and
+in the server's default `Zones` data, which is what makes the copy valid. If your server's `Zones`
+table has been changed, check those first.
+
 Restart the server and look for `Loading NavMesh successful for zone N`. The upstream docs say a
 server holding every zone's mesh needs at least 5 GB of RAM. Then watch a few roaming mobs in a
 zone you built.
