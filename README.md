@@ -10,6 +10,13 @@ OpenDAoC server given its address and your credentials, because OpenDAoC account
 
 ## Contents so far
 
+- [`docs/research/ops-tooling-inventory.md`](docs/research/ops-tooling-inventory.md) — survey of
+  existing OpenDAoC operational tooling, gaps, and what a write needs to reach a running server.
+- [`server-scripts/probe/`](server-scripts/probe/) — `LabProbe.cs`, a drop-in script for lab
+  servers that prints what the server holds in memory; used by the
+  [cache-probe runbook](docs/runbooks/cache-probe.md).
+- [`server-scripts/ScriptCheck.csproj`](server-scripts/ScriptCheck.csproj) — compile check for the
+  drop-in scripts against an OpenDAoC-Core build.
 - [`navmesh/`](navmesh/) — building OpenDAoC navmeshes on Linux and macOS without BuildNav's
   Windows-only `RecastDemo.exe`, plus tools to check `.nav` files. Start with
   [its README](navmesh/README.md).

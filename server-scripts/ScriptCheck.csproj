@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Compile check for the drop-in scripts in this folder. Run it before copying a script to a
+    server. The server compiles its whole scripts/ folder into one assembly at boot, so a single
+    script that fails to compile takes every script down with it.
+
+      dotnet build server-scripts/ScriptCheck.csproj -p:CoreLibs=/path/to/OpenDAoC-Core/Release/lib
+
+    CoreLibs is the "lib" folder of an OpenDAoC-Core build, ideally the one the target server
+    runs. This project only type-checks the scripts; its output DLL isn't meant to be deployed.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <OutputType>Library</OutputType>
+    <AssemblyName>OpenDaocToolsScriptCheck</AssemblyName>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <BaseOutputPath>$(MSBuildThisFileDirectory)../build/script-check/bin/</BaseOutputPath>
+  </PropertyGroup>
+
+  <Target Name="RequireCoreLibs" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="'$(CoreLibs)' == '' Or !Exists('$(CoreLibs)/GameServer.dll')"
+           Text="Set -p:CoreLibs=... to an OpenDAoC-Core build's lib folder (one containing GameServer.dll)." />
+  </Target>
+
+  <ItemGroup>
+    <Compile Include="**/*.cs" Exclude="obj/**;bin/**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="GameServer"><HintPath>$(CoreLibs)/GameServer.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="CoreBase"><HintPath>$(CoreLibs)/CoreBase.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="CoreDatabase"><HintPath>$(CoreLibs)/CoreDatabase.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+
+</Project>
