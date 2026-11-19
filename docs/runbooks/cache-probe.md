@@ -87,9 +87,14 @@ script didn't load: check the startup log for compile errors.
 
 ### 5. For classes A and C: a client
 
-Have a game client that can connect to port 10301, and two accounts in the lab DB:
-- an Admin (plvl 3), for in-game commands;
-- an ordinary test account with one character, `LabChar` below.
+Any client that can log in on port 10301 works, including a headless one (eod-client's
+`tools/DaocCli`: `--create`, `--enter <slot> --stay <s>`, `--goto <zone>`; exit code 2 means login
+denied). The probe and `probe save` run from the console, so no one has to watch the game.
+Accounts in the lab DB:
+- an account with one character, `LabChar` below. Automatic account creation makes it on first
+  login;
+- Admin (plvl 3) on that account for C3's `/jump` and B5's in-game reload. Set `PrivLevel` while
+  it's logged out.
 
 ## Tests
 
@@ -183,12 +188,16 @@ TABLE Ban` and adjust.
 
 ### Class C: live objects that save back
 
-**C1. Online character, a simple field**
+Core saves only the columns that changed in memory since the row was loaded or last saved. Run
+`probe save LabChar` once after login so the database matches memory before you start.
 
-`LabChar` is in the world.
+**C1. Online character, money**
+
+`LabChar` is in the world. Money is per account and realm in `AccountXMoney` (`AccountId` is the
+account name); the `Copper` columns of `DOLCharacters` are no longer read.
 ```sql
-SELECT Name, Level, Copper FROM DOLCharacters WHERE Name='LabChar';
-UPDATE DOLCharacters SET Copper=Copper+5 WHERE Name='LabChar';
+SELECT * FROM AccountXMoney WHERE AccountId='<account>';
+UPDATE AccountXMoney SET Copper=Copper+5 WHERE AccountId='<account>' AND Realm=<realm>;
 ```
 `probe player LabChar` → old money. `probe save LabChar`, then `SELECT` again → expect the
 **old** value back in the database. The edit is lost.
@@ -199,6 +208,12 @@ This is the case in [live-character-edits.md](../research/live-character-edits.m
 with `SerializedSpecs`: change one spec level, `probe save LabChar`, and confirm the database
 reverts. Then log `LabChar` out to character select, repeat the `UPDATE`, log in, and
 `probe player LabChar` → the new spec level (offline edit works).
+
+**C3. Online character, a column the server changed**
+
+`LabChar` is in the world and has moved since its last save (e.g. `/jump`). In one `UPDATE`, add
+1000 to `Xpos` and 7 to `Copper` in `DOLCharacters`, then `probe save LabChar`. Expect `Xpos` to be
+overwritten with the in-memory position, and `Copper` (unchanged in memory) to keep the edit.
 
 ### Class D: loaded only at startup
 
@@ -235,16 +250,18 @@ Each of these has a command. Test them as B1 if time allows:
 | B7 one-time drop | stale until `probe call loot-otd` | stale; call showed the new level | yes |
 | B8 data quest | stale until `probe call quests` | no match; call found the renamed quest | yes |
 | A1 merchant list | live | new item with no refresh (probe only; in-game window not checked) | yes |
-| A2 ban | next login refused; session kept | not run (needs a client) | |
-| C1 online character, money | DB edit lost on save | not run (needs a client) | |
-| C2 online character, specs | lost online; works offline | not run (needs a client) | |
+| A2 ban | next login refused; session kept | session stayed up 30 s; next login "BannedAccount"; login works after delete | yes |
+| C1 online character, money | DB edit lost on save | `AccountXMoney` edit lost at the first save. (Run first on `DOLCharacters.Copper`: kept, but that column is no longer read) | yes |
+| C2 online character, specs | lost online; works offline | **kept** online: survived `probe save` and the logout save, while memory kept the old level. Offline edit loaded, with spec points at -2 (unchecked) | **no**: saves write only changed columns |
+| C3 changed column | moved column lost; untouched column kept | `Xpos` overwritten; `Copper` kept | yes |
 | D1 keep | applies at restart only | unclaimed keep: old level after the write; new level after a restart | yes |
 
 Core commit tested: `0ac41d443` (EoD fork, tag 2026.09.36)  Date: 2026-11-19
 
 Every value was restored and refreshed afterwards. One probe bug turned up: arguments were cut at
 the first space, so loot and mob names with spaces weren't found. Fixed in the same commit; the
-fix was tested live on the same build.
+fix was tested live on the same build. A2 and C1–C3 ran later the same day with eod-client's
+headless `DaocCli` as the client.
 
 Afterwards, update Appendix A: mark each row verified or corrected, with the commit and date.
 Drop `lab_scratch` when finished.

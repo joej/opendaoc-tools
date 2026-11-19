@@ -462,7 +462,7 @@ the others still need a live test before an operation is built on them.
 | Starting locations, starter equipment | Static caches in scripts | `/refresh` (`[RefreshCommand]` methods) | B |
 | Loot (`LootGenerator`, `LootTemplate`, `MobXLootTemplate`, `LootOTD`) | `LootMgr` registry built at boot; static template caches | `ReloadLootTemplates()` / `ReloadLootOTD()` exist but **no command calls them**; `RefreshGenerators(mob)` via `/mob`. Template and one-time-drop reloads **verified** (called by the lab probe) | B (host only) |
 | Data quests (`DataQuest`) | Static cache filled once (`GameObject` static constructor) | `FillDataQuestCache()` is public; **no command calls it**. **Verified** (called by the lab probe) | B (host only) |
-| Online characters, their inventory | Live `GamePlayer` objects, saved on autosave/logout | None: direct DB edits are **overwritten** by the next save (worked case: a `SerializedSpecs` fix, [live-character-edits.md](live-character-edits.md)) | C |
+| Online characters, their inventory | Live `GamePlayer` objects, saved on autosave/logout. Saves write only the columns that changed in memory | None. **Verified:** the session never sees a direct edit. The edit survives the save unless the server changed that column in memory (then it's overwritten). Money (`accountxmoney`) is always overwritten. Details: [live-character-edits.md](live-character-edits.md) | C |
 | Guilds | `GuildMgr` in memory, saved by `SaveAllGuilds` | None: DB edits are overwritten | C |
 | Offline characters | DB only | None needed, but the character must not log in during the edit | A |
 | Keeps, hook points, guards; regions, zones, areas | Loaded at boot (`KeepManager`, `WorldMgr`, `AreaMgr`) | None found. Keep level **verified** (applies at restart only); regions, zones and areas not tested | D |
@@ -474,7 +474,8 @@ the others still need a live test before an operation is built on them.
   the refresh method directly. "Host only" rows have refresh methods that no GM command reaches,
   so the host can do better than an operator can today.
 - **C — live objects that save back.** The host op must change the live object and let Core
-  save it. A direct DB write is lost.
+  save it. A direct DB write is never seen by the live object, and is lost or applied at the next
+  login depending on what the player does meanwhile.
 - **D — boot only.** The host op stages the change and reports "applies at restart".
 
 **Consequences for the design:**

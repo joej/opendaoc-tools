@@ -7,14 +7,38 @@ to test with. The quick fix was an SQL update to `dolcharacters.SerializedSpecs`
 while the character is **offline**:
 
 - The server keeps an online character in memory (`GamePlayer`) and writes it back to the database
-  when it saves (on logout, and periodically). A database edit made while the player is in the world
-  is overwritten at the next save, and the player never sees it.
+  when it saves (on logout, and periodically). The player never sees a database edit made while
+  they're in the world, and the next save can overwrite it (see "Tested" below for exactly when).
 - So the player had to log out to character select, wait for the edit, and log back in. Moving a
   character between accounts by SQL has the same problem, and it surprised a player who was logged
   in to the source account at the time.
 
 A tool that edits characters only through the database (as most shard admin panels do) has this
 gap. It needs either a "player must be offline" check, or a path through the running server.
+
+## Tested on a lab copy (2026-11-19, Core `0ac41d443`)
+
+Core writes only the columns that changed. Each row object keeps a snapshot from when it was loaded or
+last saved, and a save sends `UPDATE` for the columns whose in-memory value differs from it
+(`DataObject.GetDirtyBindings`, `SqlObjectDatabase.cs`), then takes a new snapshot. So for an
+online character:
+
+- **Nothing reloads the edit.** The player keeps the old value in memory for the whole session.
+- **The edit is lost if the server changed that column in memory.** A column the server didn't
+  change survives the save and takes effect at the next login. With a headless client: a
+  `SerializedSpecs` edit and a `Copper` edit both survived `SaveIntoDatabase()` and the logout
+  save. After a `/jump`, an edit to `Xpos` was overwritten by the save and an edit to `Copper` in
+  the same row was not.
+- **Money is the exception, and is always overwritten.** This fork keeps money per account and realm in
+  `accountxmoney`; `dolcharacters.Copper` etc. are no longer read. The save re-reads that row and sets
+  every money field from memory, so an online edit there was lost at the first save.
+- **An offline edit works, but nothing checks it.** Raising `Slash` from 1 to 2 at character
+  select loaded as `Slash = 2`, with spec points at -2. A tool has to go through Core's own logic
+  (or do its sums) to keep a character valid.
+
+So in the 2026-11-09 case, the spec string most likely also changed in memory before the save
+(the player trained, or the server rewrote it); that wasn't recorded at the time. An edit that "usually survives" is worse than one
+that never does: whether it lands depends on what the player does before the next save.
 
 ## What the tool needs
 
