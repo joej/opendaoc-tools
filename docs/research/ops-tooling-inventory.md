@@ -465,7 +465,7 @@ the others still need a live test before an operation is built on them.
 | Online characters, their inventory | Live `GamePlayer` objects, saved on autosave/logout | None: direct DB edits are **overwritten** by the next save (worked case: a `SerializedSpecs` fix, [live-character-edits.md](live-character-edits.md)) | C |
 | Guilds | `GuildMgr` in memory, saved by `SaveAllGuilds` | None: DB edits are overwritten | C |
 | Offline characters | DB only | None needed, but the character must not log in during the edit | A |
-| Keeps, hook points, guards; regions, zones, areas | Loaded at boot (`KeepManager`, `WorldMgr`, `AreaMgr`) | None found | D |
+| Keeps, hook points, guards; regions, zones, areas | Loaded at boot (`KeepManager`, `WorldMgr`, `AreaMgr`) | None found. Keep level **verified** (applies at restart only); regions, zones and areas not tested | D |
 
 **Classes:**
 - **A — read when used.** A write through Core's DB layer is live. The host op writes, plus

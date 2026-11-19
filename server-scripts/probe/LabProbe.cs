@@ -22,6 +22,7 @@ using System.Reflection;
 using DOL.Database;
 using DOL.GS;
 using DOL.GS.Commands;
+using DOL.GS.Keeps;
 using DOL.GS.PacketHandler;
 using DOL.GS.ServerProperties;
 
@@ -39,6 +40,7 @@ namespace OpenDaocTools.Scripts
         "/probe quests [nameFilter]           - data quest cache",
         "/probe merchant <itemListId> <page>  - merchant page as the window would build it",
         "/probe player <exactName>            - an online player's level, money, RP, specs",
+        "/probe keep <keepId>                 - a keep's level, realm and claim as loaded",
         "/probe call <loot-templates|loot-mobtemplates|loot-otd|quests> - run a refresh no command reaches",
         "/probe save <exactName>              - save an online player now (class C test)")]
     public class LabProbeCommand : AbstractCommandHandler, ICommandHandler
@@ -68,6 +70,7 @@ namespace OpenDaocTools.Scripts
                     case "quests": ShowQuests(client, args.Length > 2 ? Rest(args, 2) : null); break;
                     case "merchant": ShowMerchant(client, Arg(args, 2), Arg(args, 3)); break;
                     case "player": ShowPlayer(client, Rest(args, 2)); break;
+                    case "keep": ShowKeep(client, Arg(args, 2)); break;
                     case "call": Call(client, Arg(args, 2)); break;
                     case "save": Save(client, Rest(args, 2)); break;
                     default: DisplaySyntax(client); break;
@@ -204,6 +207,14 @@ namespace OpenDaocTools.Scripts
                 " rp=" + p.RealmPoints + " specpoints=" + p.SkillSpecialtyPoints);
             foreach (Specialization s in p.GetSpecList())
                 Say(client, "  spec " + s.KeyName + " = " + s.Level);
+        }
+
+        private static void ShowKeep(GameClient client, string idText)
+        {
+            AbstractGameKeep k = GameServer.KeepManager.GetKeepByID(ParseInt(idText, "keepId"));
+            if (k == null) { Say(client, "keep " + idText + ": not loaded"); return; }
+            Say(client, "keep " + k.KeepID + ": name=" + k.Name + " level=" + k.Level +
+                " realm=" + k.Realm + " claimed=" + (k.Guild == null ? "no" : k.Guild.Name));
         }
 
         private static void Call(GameClient client, string what)

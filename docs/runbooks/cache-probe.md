@@ -203,10 +203,15 @@ reverts. Then log `LabChar` out to character select, repeat the `UPDATE`, log in
 ### Class D: loaded only at startup
 
 **D1. Keep**
+
+Pick an unclaimed keep: keeps save themselves on claim, release, level change and reset, so a
+claimed keep could write its old level back.
 ```sql
+SELECT KeepID, Name, Level, ClaimedGuildName FROM Keep WHERE KeepID=<k>;
 UPDATE Keep SET Level=Level+1 WHERE KeepID=<k>;
 ```
-The probe has no keep reader, so observe in game: no change. Restart the lab instance → changed.
+`probe keep <k>` → old level. Restart the lab instance → `probe keep <k>` → new level. Restore
+the level and restart again.
 
 ### Optional, also class B
 
@@ -233,7 +238,7 @@ Each of these has a command. Test them as B1 if time allows:
 | A2 ban | next login refused; session kept | not run (needs a client) | |
 | C1 online character, money | DB edit lost on save | not run (needs a client) | |
 | C2 online character, specs | lost online; works offline | not run (needs a client) | |
-| D1 keep | applies at restart only | not run (needs a client) | |
+| D1 keep | applies at restart only | unclaimed keep: old level after the write; new level after a restart | yes |
 
 Core commit tested: `0ac41d443` (EoD fork, tag 2026.09.36)  Date: 2026-11-19
 
