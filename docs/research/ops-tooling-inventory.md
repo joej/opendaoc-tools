@@ -441,26 +441,27 @@ acceptable), and Eve-of-Darkness/db-public (upgrade-without-clobber approach).
 ## Appendix A — What a write needs to reach live state
 
 A design input for gap 4. For each kind of data: how Core holds it, and what, if anything,
-makes a change visible without a restart. Read from Core `b9b32cf`, **not exercised**. Every row
-needs a live test before an operation is built on it.
+makes a change visible without a restart. Read from Core `b9b32cf`. Rows marked **verified** were
+tested on a lab copy on 2026-11-19 (Core `0ac41d443`, [cache-probe runbook](../runbooks/cache-probe.md#results));
+the others still need a live test before an operation is built on them.
 
 | Data (tables) | How Core holds it | Existing way to refresh | Class |
 |---|---|---|---|
 | Bans (`Bans`) | Queried at every login (`AbstractServerRules.cs:58,71`) | None needed for new logins; an online target must also be kicked | A |
-| Merchant lists (`MerchantItem`) | Queried per page when the window is built (`MerchantTradeItems.GetItemsInPage`) | None needed; the item templates come from the item cache (below) | A |
+| Merchant lists (`MerchantItem`) | Queried per page when the window is built (`MerchantTradeItems.GetItemsInPage`) | None needed; the item templates come from the item cache (below). **Verified** with the probe; the in-game window not yet checked | A |
 | Accounts (`Account`) | Read at login (`LoginRequestHandler.cs:270`); an online session holds its own object | Offline: none needed. Online: change the session's object | A / C |
-| Item templates (`ItemTemplate`) | **`PreCache = true`**: the whole table is held by the DB layer. Writes through Core's DB layer update the cache; direct SQL does not | `/item load <id_nb>`, `/item loadpackage <pkg>` (`UpdateInCache`) | B |
-| Server properties (`serverproperty`) | Loaded at boot into static fields | `/serverproperties refresh` (`Properties.Refresh()`) | B |
-| Spells, spell lines | `SkillBase` caches | `/reload spells` | B |
+| Item templates (`ItemTemplate`) | **`PreCache = true`**: the whole table is held by the DB layer. Writes through Core's DB layer update the cache; direct SQL does not | `/item load <id_nb>`, `/item loadpackage <pkg>` (`UpdateInCache`); works from the console. **Verified** | B |
+| Server properties (`serverproperty`) | Loaded at boot into static fields | `/serverproperties refresh` (`Properties.Refresh()`). **Verified** for the property itself. But static fields that copy a property when their class loads never see a refresh: 12 in `GeneratedUniqueItem.cs` (the `ROG_*` weights and qualities), 2 in `OnlineStatusUpdate.cs`. Those properties are effectively D | B |
+| Spells, spell lines | `SkillBase` caches | `/reload spells`. **Verified** | B |
 | Specialisations | `SkillBase` | `/reload specs` | B |
-| NPC templates (`NpcTemplate`) | `NpcTemplateMgr` | `/reload npctemplates`. Already-spawned mobs probably keep old values until respawn _(verify)_ | B |
+| NPC templates (`NpcTemplate`) | `NpcTemplateMgr` | `/reload npctemplates`. **Verified**; a mob already spawned from the template keeps its old values | B |
 | NPC equipment (`NPCEquipment`) | `GameNpcInventoryTemplate`, built at boot | Re-initialised by a `/mob` subcommand (`mob.cs:1772`) | B |
-| Mob spawns (`Mob`) | Loaded with the region | `/reload mob [realm\|name]` for **the GM's current region only**; refused from the console ("Region reload not supported from console") | B |
+| Mob spawns (`Mob`) | Loaded with the region | `/reload mob [realm\|name]` for **the GM's current region only**; refused from the console ("Region reload not supported from console"). Console refusal **verified**; in-game reload not yet run | B |
 | Static objects (`WorldObject`) | Loaded with the region | `/reload object` (same region limit) | B |
 | Teleports, doors | `WorldMgr`, `DoorMgr` | `/reload teleports`, `/reload doors` | B |
 | Starting locations, starter equipment | Static caches in scripts | `/refresh` (`[RefreshCommand]` methods) | B |
-| Loot (`LootGenerator`, `LootTemplate`, `MobXLootTemplate`, `LootOTD`) | `LootMgr` registry built at boot; static template caches | `ReloadLootTemplates()` / `ReloadLootOTD()` exist but **no command calls them**; `RefreshGenerators(mob)` via `/mob` | B (host only) |
-| Data quests (`DataQuest`) | Static cache filled once (`GameObject` static constructor) | `FillDataQuestCache()` is public; **no command calls it** | B (host only) |
+| Loot (`LootGenerator`, `LootTemplate`, `MobXLootTemplate`, `LootOTD`) | `LootMgr` registry built at boot; static template caches | `ReloadLootTemplates()` / `ReloadLootOTD()` exist but **no command calls them**; `RefreshGenerators(mob)` via `/mob`. Template and one-time-drop reloads **verified** (called by the lab probe) | B (host only) |
+| Data quests (`DataQuest`) | Static cache filled once (`GameObject` static constructor) | `FillDataQuestCache()` is public; **no command calls it**. **Verified** (called by the lab probe) | B (host only) |
 | Online characters, their inventory | Live `GamePlayer` objects, saved on autosave/logout | None: direct DB edits are **overwritten** by the next save (worked case: a `SerializedSpecs` fix, [live-character-edits.md](live-character-edits.md)) | C |
 | Guilds | `GuildMgr` in memory, saved by `SaveAllGuilds` | None: DB edits are overwritten | C |
 | Offline characters | DB only | None needed, but the character must not log in during the edit | A |

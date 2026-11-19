@@ -58,18 +58,18 @@ namespace OpenDaocTools.Scripts
             {
                 switch (args[1].ToLowerInvariant())
                 {
-                    case "item": ShowItem(client, Arg(args, 2)); break;
-                    case "prop": ShowProp(client, Arg(args, 2)); break;
+                    case "item": ShowItem(client, Rest(args, 2)); break;
+                    case "prop": ShowProp(client, Rest(args, 2)); break;
                     case "spell": ShowSpell(client, Arg(args, 2)); break;
                     case "npctemplate": ShowNpcTemplate(client, Arg(args, 2)); break;
                     case "mob": ShowMob(client, Arg(args, 2)); break;
-                    case "loot": ShowLoot(client, Arg(args, 2)); break;
-                    case "loototd": ShowLootOtd(client, Arg(args, 2)); break;
-                    case "quests": ShowQuests(client, args.Length > 2 ? args[2] : null); break;
+                    case "loot": ShowLoot(client, Rest(args, 2)); break;
+                    case "loototd": ShowLootOtd(client, Rest(args, 2)); break;
+                    case "quests": ShowQuests(client, args.Length > 2 ? Rest(args, 2) : null); break;
                     case "merchant": ShowMerchant(client, Arg(args, 2), Arg(args, 3)); break;
-                    case "player": ShowPlayer(client, Arg(args, 2)); break;
+                    case "player": ShowPlayer(client, Rest(args, 2)); break;
                     case "call": Call(client, Arg(args, 2)); break;
-                    case "save": Save(client, Arg(args, 2)); break;
+                    case "save": Save(client, Rest(args, 2)); break;
                     default: DisplaySyntax(client); break;
                 }
             }
@@ -239,6 +239,13 @@ namespace OpenDaocTools.Scripts
             if (args.Length <= i || string.IsNullOrWhiteSpace(args[i]))
                 throw new ArgumentException("missing argument " + i + "; see /probe for usage");
             return args[i];
+        }
+
+        // The console and chat split on spaces; names such as loot templates and mobs contain them.
+        private static string Rest(string[] args, int i)
+        {
+            Arg(args, i);
+            return string.Join(" ", args, i, args.Length - i);
         }
 
         private static int ParseInt(string text, string what)

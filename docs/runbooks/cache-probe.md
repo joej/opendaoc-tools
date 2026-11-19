@@ -30,23 +30,23 @@ Use the same MariaDB server as the real instance, with a new database name. Adju
 invocation to your setup, e.g. `docker exec -i <db-container> mysql ...`:
 
 ```bash
-mysqldump --single-transaction opendaoc > /tmp/opendaoc-lab.sql
-mysql -e 'CREATE DATABASE opendaoc_lab'
-mysql opendaoc_lab < /tmp/opendaoc-lab.sql
+mysqldump --single-transaction opendaoc > /tmp/lab_scratch.sql
+mysql -e 'CREATE DATABASE lab_scratch'
+mysql lab_scratch < /tmp/lab_scratch.sql
 ```
 
 Turn off everything in the copy that talks to the outside world, so the lab instance can't post
 to Discord, mail anyone, or announce itself:
 
 ```sql
--- in opendaoc_lab
+-- in lab_scratch
 UPDATE ServerProperty SET Value='False' WHERE `Key` IN ('Discord_Webhook_Active','serverlistupdate_enabled','atlas_api');
 UPDATE ServerProperty SET Value=''      WHERE `Key` IN ('Discord_Webhook_ID','Discord_RVR_Webhook_ID','Discord_AlbChat_Webhook_ID',
                                                        'Discord_HibChat_Webhook_ID','Discord_MidChat_Webhook_ID',
                                                        'log_email_addresses','bug_report_email_addresses');
 ```
 
-To reset at any point, drop `opendaoc_lab` and repeat this step.
+To reset at any point, drop `lab_scratch` and repeat this step.
 
 ### 2. A second server instance
 
@@ -58,7 +58,7 @@ Edit its `config/serverconfig.xml`:
 | `Port` | `10301` |
 | `RegionPort`, `UdpPort` | `10401` |
 | `ServerName` | something visibly "LAB" |
-| `DBConnectionString` | `Database=opendaoc_lab` |
+| `DBConnectionString` | `Database=lab_scratch` |
 | `EnableUPnP` | `False` |
 
 Record the Core commit of this build in the results.
@@ -93,7 +93,7 @@ Have a game client that can connect to port 10301, and two accounts in the lab D
 
 ## Tests
 
-`$SQL` stands for your mysql client on `opendaoc_lab`. Pick real ids from the lab DB. Note the
+`$SQL` stands for your mysql client on `lab_scratch`. Pick real ids from the lab DB. Note the
 original value before each `UPDATE` so you can restore it, or reset the DB afterwards.
 
 ### Class B: cached, with a refresh path
@@ -103,7 +103,7 @@ original value before each `UPDATE` so you can restore it, or reset the DB after
 SELECT Id_nb, Price FROM ItemTemplate WHERE Id_nb='<id>';
 UPDATE ItemTemplate SET Price=Price+1 WHERE Id_nb='<id>';
 ```
-`probe item <id>` → expect the **old** price. Refresh: in game, as Admin, `/item load <id>`.
+`probe item <id>` → expect the **old** price. Refresh: `item load <id>` (console or in game as Admin).
 Then `probe item <id>` → the new price.
 
 **B2. Server property**
@@ -221,21 +221,25 @@ Each of these has a command. Test them as B1 if time allows:
 
 | Test | Expected | Observed | Pass? |
 |---|---|---|---|
-| B1 item template | stale until `/item load` | | |
-| B2 server property | stale until `serverproperties refresh` | | |
-| B3 spell | stale until `reload spells` | | |
-| B4 NPC template | stale until `reload npctemplates`; spawned mob unchanged | | |
-| B5 mob spawn | stale; console reload refused; in-game reload works | | |
-| B6 loot template | stale until `probe call loot-templates` | | |
-| B7 one-time drop | stale until `probe call loot-otd` | | |
-| B8 data quest | stale until `probe call quests` | | |
-| A1 merchant list | live | | |
-| A2 ban | next login refused; session kept | | |
-| C1 online character, money | DB edit lost on save | | |
-| C2 online character, specs | lost online; works offline | | |
-| D1 keep | applies at restart only | | |
+| B1 item template | stale until `/item load` | stale; `item load` from the **console** refreshed it | yes |
+| B2 server property | stale until `serverproperties refresh` | stale; refresh showed the new value | yes |
+| B3 spell | stale until `reload spells` | stale; reload showed the new damage | yes |
+| B4 NPC template | stale until `reload npctemplates`; spawned mob unchanged | stale; reload updated the template; the spawned mob kept the old level | yes |
+| B5 mob spawn | stale; console reload refused; in-game reload works | stale; console refused ("Region reload not supported from console"). In-game part not run | partly |
+| B6 loot template | stale until `probe call loot-templates` | stale; call showed the new chance | yes |
+| B7 one-time drop | stale until `probe call loot-otd` | stale; call showed the new level | yes |
+| B8 data quest | stale until `probe call quests` | no match; call found the renamed quest | yes |
+| A1 merchant list | live | new item with no refresh (probe only; in-game window not checked) | yes |
+| A2 ban | next login refused; session kept | not run (needs a client) | |
+| C1 online character, money | DB edit lost on save | not run (needs a client) | |
+| C2 online character, specs | lost online; works offline | not run (needs a client) | |
+| D1 keep | applies at restart only | not run (needs a client) | |
 
-Core commit tested: ______  Date: ______
+Core commit tested: `0ac41d443` (EoD fork, tag 2026.09.36)  Date: 2026-11-19
+
+Every value was restored and refreshed afterwards. One probe bug turned up: arguments were cut at
+the first space, so loot and mob names with spaces weren't found. Fixed in the same commit; the
+fix was tested live on the same build.
 
 Afterwards, update Appendix A: mark each row verified or corrected, with the commit and date.
-Drop `opendaoc_lab` when finished.
+Drop `lab_scratch` when finished.
