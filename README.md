@@ -15,6 +15,11 @@ OpenDAoC server given its address and your credentials, because OpenDAoC account
 - [`server-scripts/probe/`](server-scripts/probe/) — `LabProbe.cs`, a drop-in script for lab
   servers that prints what the server holds in memory; used by the
   [cache-probe runbook](docs/runbooks/cache-probe.md).
+- [`server-scripts/admin-host/`](server-scripts/admin-host/) — `AdminHost.cs`, a drop-in script that
+  lets operator tools read and change the running server over a local Unix socket (JSON lines,
+  audited), with [`tools/adminctl.py`](tools/adminctl.py) as a command-line client. First slice:
+  status, online players, setting a spec live, and cache reloads. Design and test results:
+  [docs/design/admin-host.md](docs/design/admin-host.md).
 - [`server-scripts/ScriptCheck.csproj`](server-scripts/ScriptCheck.csproj) — compile check for the
   drop-in scripts against an OpenDAoC-Core build.
 - [`navmesh/`](navmesh/) — building OpenDAoC navmeshes on Linux and macOS without BuildNav's

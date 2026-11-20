@@ -396,6 +396,10 @@ Interpretation, from Parts 1 and 2:
      so renaming a script class or its namespace silently breaks the world objects that use it.
      Per gaheris, packet handlers must sit in a namespace ending in the client version
      (`…Client.v168`) or they are skipped (verify).
+   - **Only assemblies Core has already loaded.** Scripts compile against the assemblies loaded at
+     that moment. Using another one (seen with `System.Text.Json` and Newtonsoft.Json on Core
+     `0ac41d443`) produces an empty `GameServerScripts.dll` with no error shown, and the server stops
+     at startup with "Bad IL format". Verified on a lab server, 2026-11-20.
    - **Check compilation before deploying.** gaheris builds the folder with a
      `GameServerScripts.csproj` before restarting. Here that belongs in CI.
 

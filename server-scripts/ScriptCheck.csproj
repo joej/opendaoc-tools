@@ -9,6 +9,11 @@
 
     CoreLibs is the "lib" folder of an OpenDAoC-Core build, ideally the one the target server
     runs. This project only type-checks the scripts; its output DLL isn't meant to be deployed.
+
+    It can't catch one failure: the server compiles scripts against only the assemblies it has
+    loaded by then, while this project sees the whole framework. A script using, say,
+    System.Text.Json passes here and stops the server at startup. Start a new script on a lab
+    server first (docs/design/admin-host.md, "Tested").
   -->
 
   <PropertyGroup>
