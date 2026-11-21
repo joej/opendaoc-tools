@@ -65,7 +65,7 @@ answers `timeout` if the loop is stuck. It never blocks the loop.
 | `server.status` | Uptime, players online, tick rate (from what `StatPrint` already measures) | read |
 | `player.list` | Online players: name, account, level, class, region, zone | read |
 | `player.get` | One online player: level, money, realm points, specs with levels, spec points | read |
-| `player.spec.set` | Sets one spec's level on an **online** player through the live object | C |
+| `player.spec.set` | Sets one spec's level on an **online** player through the live object (since 2026-11-21: "online" means `EnteredGame`, and `queue: true` queues it for an offline character, see [queued edits](admin-host-queued-edits.md)) | C |
 | `cache.reload` | `loot-templates`, `loot-mobtemplates`, `loot-otd`, `quests`, `npctemplates`, `spells`, `properties`, `item <id_nb>` | B |
 
 ### `player.spec.set`, step by step

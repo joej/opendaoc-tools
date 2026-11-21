@@ -93,15 +93,16 @@ narrows the first slice: today `player.spec.set` would act on a player found by 
 - Forcing an apply without the player logging in. It needs the player's credentials or a
   connection-less player, and no case for it has come up.
 
-## Open questions, to settle on the lab
+## Open questions
 
-- Whether a spec edit sent just after `GameEntered` is shown correctly, or whether the client's own
-  login traffic overwrites it.
+- ~~Whether a spec edit sent just after `GameEntered` is shown correctly~~: settled on the lab (below).
+  The edit's updates are the last skill and stats packets of the login.
 - Spec points at queue time: the queue-time check could ask Core for the total (the GM-level
   `VerifySpecPoints` call above) instead of waiting for login. That would also let the online path drop
-  its copy of the cost formula.
-- Whether `EnteredGame` is reset on logout and on a region change (the handler fires `RegionChanged`
-  instead of `GameEntered` when it is already true).
+  its copy of the cost formula. Not done: today an unaffordable raise is queued and then refused at login.
+- `EnteredGame` on a region change: the player-init handler fires `RegionChanged` instead of
+  `GameEntered` when it is already true, so pending edits aren't re-checked on zoning. That's intended,
+  but zoning with the host in use isn't tested.
 
 ## Testing
 
@@ -118,3 +119,26 @@ On the lab copy with `DaocCli`, as for the first slice:
 - Restart between queuing and login: the edit survives. Re-adding an applied entry by hand and logging
   in again changes nothing.
 - A player found by name with `EnteredGame` false (during login) is treated as not in the world.
+
+## Tested (2026-11-21, Core `0ac41d443`)
+
+On the lab copy, with `DaocCli` logging `LabChar` (level 10, Slash 2, Thrust 3) in and out:
+
+| Check | Result |
+|---|---|
+| Startup | Compiles in the server's own script compiler; the log names the store path |
+| Offline, no `queue` | `not_online`, with a hint about `queue=true` |
+| Queue-time refusals | Unknown character and a spec not in the saved specs: `not_found`. Level 0 and 11: `invalid`. `queue=yes`: `bad_request` |
+| Queuing | `slash` matched `Slash`; a second Slash edit replaced the first (`replaced` names it, same place in the order). The store file is mode 0600, and `dolcharacters` is unchanged until login |
+| `player.pending`, `.cancel` | Listing, filtering by name in any case; cancel removes the entry and audits it; cancelling it again gives `not_found` |
+| Apply at login | Slash 2 → 4 and Thrust 3 → 4 applied in queue order. `player.get`, the database and the audit (`queued`, then `applied`) agree; the store is empty |
+| Client updates | After `PlayerInitRequest` (`0xE8`), each edit sent `0x91`, `0x16` ×3, `0xFB` ×2 and `0xAF` ×2, the same as an online edit, and these were the last skill and stats packets of the session |
+| Restart | Two edits queued, graceful stop, start: the log reports 3 pending (one added by hand), all still listed |
+| Refused at login | Slash 4 → 10 (45 points, 31 available) was refused at login: nothing changed, the entry was removed, the warning and the `refused at login` audit line give the reason |
+| Re-apply | The hand-added copy of an applied edit (Slash 4) applied with `changed: false` |
+| Online path | With the character in the world, `player.spec.set` applies at once, with or without `queue=true`; `player.list` shows `inWorld` |
+| Corrupt store | Startup logs an error, the file is left as it was, and queue ops answer `failed` with the path |
+
+Not tested: the `EnteredGame` gate during a login (the headless client can't stop between world-init
+and player-init, so this is reviewed in code only), the trainable check at queue time (`LabChar`'s
+saved specs are all trainable), zoning, and still the 5 s `timeout` path from the first slice.

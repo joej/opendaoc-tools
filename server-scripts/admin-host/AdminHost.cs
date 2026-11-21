@@ -6,6 +6,10 @@
 //   {"id":"7","actor":"joe","op":"player.spec.set","args":{"name":"LabChar","spec":"Slash","level":5}}
 //   {"id":"7","ok":true,"result":{...}}      or      {"id":"7","ok":false,"error":{"code":"...","message":"..."}}
 //
+// An edit to a character that isn't in the world can be queued (queue=true) and is applied when the
+// character next enters the world: docs/design/admin-host-queued-edits.md. Pending edits are kept in
+// admin-pending.json next to the socket.
+//
 // Every operation runs on the game loop: the host posts one action per tick to ClientService, whose
 // posted actions finish before any client's packets for that tick are handled. Every change is
 // audited, one JSON line per request in logs/admin-host.jsonl.
@@ -49,6 +53,9 @@ namespace OpenDaocTools.Scripts
         private static Socket _listener;
         private static string _socketPath;
         private static string _auditPath;
+        private static string _pendingPath;
+        private static List<Dictionary<string, object>> _pending; // null: the store couldn't be read
+        private static readonly DOLEventHandler _onGameEntered = OnGameEntered;
         private static readonly object _auditLock = new();
         private static int _connections;
         private static volatile bool _stopping;
@@ -73,6 +80,9 @@ namespace OpenDaocTools.Scripts
                     _socketPath = Path.Combine(root, "admin.sock");
                 Directory.CreateDirectory(Path.Combine(root, "logs"));
                 _auditPath = Path.Combine(root, "logs", "admin-host.jsonl");
+                _pendingPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(_socketPath)), "admin-pending.json");
+                LoadPending();
+                GameEventMgr.AddHandler(GamePlayerEvent.GameEntered, _onGameEntered);
 
                 if (File.Exists(_socketPath))
                     File.Delete(_socketPath); // left over from a crash; a live server would hold it open
@@ -85,7 +95,7 @@ namespace OpenDaocTools.Scripts
 
                 var thread = new Thread(AcceptLoop) { IsBackground = true, Name = "AdminHost" };
                 thread.Start();
-                log.Info("AdminHost listening on " + _socketPath + " (audit: " + _auditPath + ")");
+                log.Info("AdminHost listening on " + _socketPath + " (audit: " + _auditPath + ", pending: " + _pendingPath + ")");
             }
             catch (Exception ex)
             {
@@ -98,6 +108,7 @@ namespace OpenDaocTools.Scripts
         public static void OnServerStopped(DOLEvent e, object sender, EventArgs args)
         {
             _stopping = true;
+            try { GameEventMgr.RemoveHandler(GamePlayerEvent.GameEntered, _onGameEntered); } catch { }
             try { _listener?.Close(); } catch { }
             try { if (_socketPath != null && File.Exists(_socketPath)) File.Delete(_socketPath); } catch { }
         }
@@ -319,6 +330,8 @@ namespace OpenDaocTools.Scripts
             ["player.list"] = new OpSpec { Run = PlayerList },
             ["player.get"] = new OpSpec { Run = PlayerGet },
             ["player.spec.set"] = new OpSpec { Run = PlayerSpecSet },
+            ["player.pending"] = new OpSpec { Run = PlayerPending },
+            ["player.pending.cancel"] = new OpSpec { Run = PlayerPendingCancel },
             ["cache.reload"] = new OpSpec { Run = CacheReload },
         };
 
@@ -346,6 +359,7 @@ namespace OpenDaocTools.Scripts
                     ["level"] = (int) p.Level,
                     ["class"] = p.CharacterClass?.Name,
                     ["realm"] = RealmName(p.Realm),
+                    ["inWorld"] = p.EnteredGame,
                     ["region"] = (int) p.CurrentRegionID,
                     ["zone"] = p.CurrentZone?.Description,
                 })
@@ -375,13 +389,33 @@ namespace OpenDaocTools.Scripts
             };
         }
 
-        // Same calls as Core's trainer (commands/playercommands/train.cs), minus the trainer window.
+        // In the world: set it now. Not in the world and queue=true: check it against the saved
+        // character, queue it, and apply it through SetSpec when the character enters the world
+        // (docs/design/admin-host-queued-edits.md).
         private static object PlayerSpecSet(Request req)
         {
-            GamePlayer p = OnlinePlayer(req);
+            string name = StringArg(req, "name");
             string specName = StringArg(req, "spec");
             int level = IntArg(req, "level");
+            bool queue = BoolArg(req, "queue", false);
 
+            GamePlayer p = InWorld(name);
+            if (p != null)
+            {
+                object result = SetSpec(p, specName, level, out int before, out bool changed);
+                if (changed) Audit(req, before, level, result);
+                return result;
+            }
+
+            if (!queue)
+                throw new OpError("not_online", name + " is not online (queue=true applies it at their next login)");
+            return QueueSpec(req, name, specName, level);
+        }
+
+        // Same calls as Core's trainer (commands/playercommands/train.cs), minus the trainer window.
+        private static object SetSpec(GamePlayer p, string specName, int level, out int before, out bool changed)
+        {
+            changed = false;
             Specialization spec = p.GetSpecializationByName(specName);
             if (spec == null)
                 throw new OpError("not_found", p.Name + " has no spec '" + specName + "'");
@@ -390,7 +424,7 @@ namespace OpenDaocTools.Scripts
             if (level < 1 || level > p.BaseLevel)
                 throw new OpError("invalid", "level must be 1 to " + p.BaseLevel + " (the player's level)");
 
-            int before = spec.Level;
+            before = spec.Level;
             if (level == before)
                 return SpecResult(p, spec, before, saved: false, changed: false);
 
@@ -418,9 +452,206 @@ namespace OpenDaocTools.Scripts
                 eChatType.CT_Important, eChatLoc.CL_SystemWindow);
             p.SaveIntoDatabase();
 
-            object result = SpecResult(p, spec, before, saved: true, changed: true);
-            Audit(req, before, level, result);
+            changed = true;
+            return SpecResult(p, spec, before, saved: true, changed: true);
+        }
+
+        // ---- queued edits to characters that aren't in the world ---------------------------------
+        // The store is a list of JSON objects in <socket dir>/admin-pending.json. Only jobs on the
+        // game loop (Drain) read or write it, so it needs no lock.
+
+        private static object QueueSpec(Request req, string name, string specName, int level)
+        {
+            List<Dictionary<string, object>> store = PendingStore();
+            DbCoreCharacter ch = DOLDB<DbCoreCharacter>.SelectObject(DB.Column("Name").IsEqualTo(name));
+            if (ch == null)
+                throw new OpError("not_found", "no character named " + name);
+
+            // Match against the saved specs first: SkillBase.GetSpecialization throws on an unknown key
+            // in Core 0ac41d443 (it dereferences the result before its null check).
+            int savedLevel = 0;
+            string key = null;
+            foreach (string entry in Util.SplitCSV(ch.SerializedSpecs ?? ""))
+            {
+                string[] kv = entry.Split('|');
+                if (kv.Length >= 2 && kv[0].Equals(specName, StringComparison.OrdinalIgnoreCase))
+                {
+                    key = kv[0];
+                    int.TryParse(kv[1], out savedLevel);
+                    break;
+                }
+            }
+            if (key == null)
+                throw new OpError("not_found", ch.Name + " has no saved spec '" + specName + "'");
+            Specialization spec = SkillBase.GetSpecialization(key, false);
+            if (spec == null || !spec.Trainable)
+                throw new OpError("invalid", "'" + key + "' is not a trainable spec");
+            if (level < 1 || level > ch.Level)
+                throw new OpError("invalid", "level must be 1 to " + ch.Level + " (the character's level)");
+
+            string replaced = null;
+            int at = store.FindIndex(e => (string) e["characterId"] == ch.ObjectId && (string) e["op"] == req.Op &&
+                ((string) ((Dictionary<string, object>) e["args"])["spec"]).Equals(key, StringComparison.OrdinalIgnoreCase));
+            var pending = new Dictionary<string, object>
+            {
+                ["id"] = NewPendingId(store),
+                ["characterId"] = ch.ObjectId,
+                ["name"] = ch.Name,
+                ["op"] = req.Op,
+                ["args"] = new Dictionary<string, object> { ["spec"] = key, ["level"] = (double) level },
+                ["queuedAt"] = DateTime.UtcNow.ToString("o"),
+                ["actor"] = req.Actor,
+                ["peerUid"] = (double) req.PeerUid,
+            };
+            var previous = new List<Dictionary<string, object>>(store);
+            if (at >= 0)
+            {
+                replaced = (string) store[at]["id"];
+                store[at] = pending; // keeps its place in the order
+            }
+            else
+                store.Add(pending);
+            SavePendingOrRollBack(previous);
+
+            var result = new Dictionary<string, object>
+            {
+                ["queued"] = true, ["pendingId"] = pending["id"], ["name"] = ch.Name, ["spec"] = key,
+                ["savedLevel"] = savedLevel, ["level"] = level, ["replaced"] = replaced,
+            };
+            Audit(req, savedLevel, level, result, "queued");
             return result;
+        }
+
+        // GameEntered fires inside the player-init packet handler, on a client-packet thread: only enqueue.
+        private static void OnGameEntered(DOLEvent e, object sender, EventArgs args)
+        {
+            if (sender is GamePlayer p)
+                Enqueue(new Job(() => { ApplyPending(p); return null; }));
+        }
+
+        private static void ApplyPending(GamePlayer p)
+        {
+            if (_pending == null || p.DBCharacter == null) return;
+            string id = p.DBCharacter.ObjectId;
+            List<Dictionary<string, object>> mine = _pending.Where(e => (string) e["characterId"] == id).ToList();
+            if (mine.Count == 0) return;
+            if (p.ObjectState != GameObject.eObjectState.Active || !p.EnteredGame) return; // gone again: keep them
+
+            foreach (Dictionary<string, object> entry in mine)
+            {
+                var req = new Request
+                {
+                    Id = entry["id"], Actor = entry.TryGetValue("actor", out var a) ? a as string : null,
+                    Op = (string) entry["op"], Args = (Dictionary<string, object>) entry["args"],
+                    PeerUid = entry.TryGetValue("peerUid", out var u) && u is double d ? (int) d : -1,
+                };
+                try
+                {
+                    // Edits set absolute values: if the server stops after this save but before the store
+                    // is rewritten, applying the entry again at the next login changes nothing.
+                    object result = SetSpec(p, StringArg(req, "spec"), IntArg(req, "level"), out int before, out _);
+                    Audit(req, before, IntArg(req, "level"), result, "applied");
+                }
+                catch (OpError oe)
+                {
+                    log.Warn("AdminHost pending " + req.Id + " for " + p.Name + " refused at login: " + oe.Message);
+                    Audit(req, null, null, new Dictionary<string, object> { ["code"] = oe.Code, ["message"] = oe.Message },
+                        "refused at login");
+                }
+                catch (Exception ex)
+                {
+                    log.Error("AdminHost pending " + req.Id + " for " + p.Name + " failed", ex);
+                    Audit(req, null, null, new Dictionary<string, object> { ["code"] = "failed", ["message"] = ex.Message },
+                        "failed at login");
+                }
+                _pending.Remove(entry);
+            }
+            SavePending();
+        }
+
+        private static object PlayerPending(Request req)
+        {
+            List<Dictionary<string, object>> store = PendingStore();
+            string name = req.Args.TryGetValue("name", out object n) ? n as string : null;
+            return store.Where(e => name == null || ((string) e["name"]).Equals(name, StringComparison.OrdinalIgnoreCase))
+                .Cast<object>().ToList();
+        }
+
+        private static object PlayerPendingCancel(Request req)
+        {
+            List<Dictionary<string, object>> store = PendingStore();
+            string id = StringArg(req, "id");
+            Dictionary<string, object> entry = store.FirstOrDefault(e => (string) e["id"] == id);
+            if (entry == null)
+                throw new OpError("not_found", "no pending edit '" + id + "'");
+            var previous = new List<Dictionary<string, object>>(store);
+            store.Remove(entry);
+            SavePendingOrRollBack(previous);
+            var result = new Dictionary<string, object> { ["cancelled"] = entry };
+            Audit(req, entry, null, result, "cancelled");
+            return result;
+        }
+
+        private static List<Dictionary<string, object>> PendingStore() =>
+            _pending ?? throw new OpError("failed", "the pending store " + _pendingPath +
+                " could not be read at startup; fix or move it and restart (see the server log)");
+
+        private static string NewPendingId(List<Dictionary<string, object>> store)
+        {
+            while (true)
+            {
+                string id = "p-" + Guid.NewGuid().ToString("N").Substring(0, 8);
+                if (!store.Any(e => (string) e["id"] == id)) return id;
+            }
+        }
+
+        private static void LoadPending()
+        {
+            try
+            {
+                if (!File.Exists(_pendingPath)) { _pending = new(); return; }
+                if (Json.Parse(File.ReadAllText(_pendingPath)) is not List<object> list)
+                    throw new FormatException("expected a JSON array");
+                var store = new List<Dictionary<string, object>>();
+                foreach (object o in list)
+                {
+                    if (o is not Dictionary<string, object> e || Get(e, "id") is not string ||
+                        Get(e, "characterId") is not string || Get(e, "name") is not string ||
+                        Get(e, "op") is not string || Get(e, "args") is not Dictionary<string, object>)
+                        throw new FormatException("an entry lacks id, characterId, name, op or args");
+                    store.Add(e);
+                }
+                _pending = store;
+                if (store.Count > 0) log.Info("AdminHost: " + store.Count + " pending edit(s) in " + _pendingPath);
+            }
+            catch (Exception ex)
+            {
+                // Leave the file alone, and refuse queue ops, rather than overwrite edits we couldn't read.
+                _pending = null;
+                log.Error("AdminHost could not read the pending store " + _pendingPath + "; queued edits are off", ex);
+            }
+        }
+
+        // Write to a temporary file and rename it over the store, so a crash leaves the old or the new list.
+        private static void SavePending()
+        {
+            string tmp = _pendingPath + ".tmp";
+            File.WriteAllText(tmp, Json.Write(_pending) + "\n");
+            if (!OperatingSystem.IsWindows()) // the host never starts there; this keeps the analyzer quiet
+                File.SetUnixFileMode(tmp, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            File.Move(tmp, _pendingPath, overwrite: true);
+        }
+
+        private static void SavePendingOrRollBack(List<Dictionary<string, object>> previous)
+        {
+            try { SavePending(); }
+            catch (Exception ex)
+            {
+                _pending.Clear();
+                _pending.AddRange(previous);
+                log.Error("AdminHost could not write the pending store " + _pendingPath, ex);
+                throw new OpError("failed", "could not write the pending store: " + ex.Message);
+            }
         }
 
         // A trainable spec's share of used points, as VerifySpecPoints counts it (GamePlayer.cs).
@@ -487,10 +718,26 @@ namespace OpenDaocTools.Scripts
         private static GamePlayer OnlinePlayer(Request req)
         {
             string name = StringArg(req, "name");
+            return InWorld(name) ?? throw new OpError("not_online", name + " is not online");
+        }
+
+        // A player is findable by name from the end of AddToWorld, while the world-init handler may still
+        // be sending its first packets on another thread. Only EnteredGame (set by the player-init
+        // handler, just before GameEntered) means it is fully in the world.
+        private static GamePlayer InWorld(string name)
+        {
             GamePlayer p = ClientService.Instance.GetPlayerByExactName(name);
-            if (p == null)
-                throw new OpError("not_online", name + " is not online");
-            return p;
+            return p != null && p.EnteredGame && p.ObjectState == GameObject.eObjectState.Active ? p : null;
+        }
+
+        private static object Get(Dictionary<string, object> d, string key) =>
+            d.TryGetValue(key, out object v) ? v : null;
+
+        private static bool BoolArg(Request req, string key, bool fallback)
+        {
+            if (!req.Args.TryGetValue(key, out object v) || v == null) return fallback;
+            if (v is bool b) return b;
+            throw new OpError("bad_request", "args." + key + " must be true or false");
         }
 
         private static string StringArg(Request req, string key)
@@ -508,9 +755,9 @@ namespace OpenDaocTools.Scripts
             return (int) d;
         }
 
-        private static void Audit(Request req, object before, object after, object result)
+        private static void Audit(Request req, object before, object after, object result, string phase = null)
         {
-            string line = Json.Write(new Dictionary<string, object>
+            var entry = new Dictionary<string, object>
             {
                 ["time"] = DateTime.UtcNow.ToString("o"),
                 ["peerUid"] = req.PeerUid,
@@ -520,7 +767,9 @@ namespace OpenDaocTools.Scripts
                 ["before"] = before,
                 ["after"] = after,
                 ["result"] = result,
-            });
+            };
+            if (phase != null) entry["phase"] = phase; // queued, applied, refused at login, failed at login, cancelled
+            string line = Json.Write(entry);
             log.Info("AdminHost " + line);
             try
             {

@@ -17,9 +17,10 @@ OpenDAoC server given its address and your credentials, because OpenDAoC account
   [cache-probe runbook](docs/runbooks/cache-probe.md).
 - [`server-scripts/admin-host/`](server-scripts/admin-host/) — `AdminHost.cs`, a drop-in script that
   lets operator tools read and change the running server over a local Unix socket (JSON lines,
-  audited), with [`tools/adminctl.py`](tools/adminctl.py) as a command-line client. First slice:
-  status, online players, setting a spec live, and cache reloads. Design and test results:
-  [docs/design/admin-host.md](docs/design/admin-host.md).
+  audited), with [`tools/adminctl.py`](tools/adminctl.py) as a command-line client. It does
+  status, online players, setting a spec live (or queued until an offline character's next login),
+  and cache reloads. Design and test results: [docs/design/admin-host.md](docs/design/admin-host.md)
+  and [docs/design/admin-host-queued-edits.md](docs/design/admin-host-queued-edits.md).
 - [`server-scripts/ScriptCheck.csproj`](server-scripts/ScriptCheck.csproj) — compile check for the
   drop-in scripts against an OpenDAoC-Core build.
 - [`navmesh/`](navmesh/) — building OpenDAoC navmeshes on Linux and macOS without BuildNav's

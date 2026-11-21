@@ -7,9 +7,12 @@ Run it as the server's user, on the server's machine; the socket is mode 0600.
     adminctl.py player.list
     adminctl.py player.get name=LabChar
     adminctl.py player.spec.set name=LabChar spec=Slash level=5
+    adminctl.py player.spec.set name=LabChar spec=Slash level=5 queue=true   # offline: at next login
+    adminctl.py player.pending
+    adminctl.py player.pending.cancel id=p-1a2b3c4d
     adminctl.py cache.reload what=item id=0_Demon_Bound_Bracelet
 
-Arguments are key=value; a value that is a whole number is sent as a number. Socket: --socket, else
+Arguments are key=value; a whole number is sent as a number, true and false as booleans. Socket: --socket, else
 $OPENDAOC_ADMIN_SOCKET, else ./admin.sock. Actor (who is acting, for the audit log): --actor, else $USER.
 Exit code 0 when the answer is ok, 1 when it is an error, 2 for usage or connection problems.
 """
@@ -36,7 +39,12 @@ def main() -> int:
         if not sep or not key:
             print(f"bad argument {kv!r}: expected key=value", file=sys.stderr)
             return 2
-        args[key] = int(value) if value.lstrip("-").isdigit() else value
+        if value.lstrip("-").isdigit():
+            args[key] = int(value)
+        elif value in ("true", "false"):
+            args[key] = value == "true"
+        else:
+            args[key] = value
 
     request = {"id": "1", "actor": a.actor, "op": a.op, "args": args}
     try:
