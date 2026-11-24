@@ -8,7 +8,7 @@
 //
 // An edit to a character that isn't in the world can be queued (queue=true) and is applied when the
 // character next enters the world: docs/design/admin-host-queued-edits.md. Pending edits are kept in
-// admin-pending.json next to the socket.
+// admin-pending.json next to the socket. Moving a player and setting money: docs/design/admin-host-move-money.md.
 //
 // Every operation runs on the game loop: the host posts one action per tick to ClientService, whose
 // posted actions finish before any client's packets for that tick are handled. Every change is
@@ -330,6 +330,8 @@ namespace OpenDaocTools.Scripts
             ["player.list"] = new OpSpec { Run = PlayerList },
             ["player.get"] = new OpSpec { Run = PlayerGet },
             ["player.spec.set"] = new OpSpec { Run = PlayerSpecSet },
+            ["player.move"] = new OpSpec { Run = PlayerMove },
+            ["player.money.set"] = new OpSpec { Run = PlayerMoneySet },
             ["player.pending"] = new OpSpec { Run = PlayerPending },
             ["player.pending.cancel"] = new OpSpec { Run = PlayerPendingCancel },
             ["cache.reload"] = new OpSpec { Run = CacheReload },
@@ -368,6 +370,32 @@ namespace OpenDaocTools.Scripts
         private static object PlayerGet(Request req)
         {
             GamePlayer p = OnlinePlayer(req);
+            var position = Pos(p.CurrentRegionID, p.X, p.Y, p.Z, p.Heading);
+            position["zone"] = p.CurrentZone?.Description;
+
+            List<object> inventory;
+            lock (p.Inventory.Lock)
+                inventory = p.Inventory.AllItems
+                    .Where(i => i != null)
+                    .OrderBy(i => i.SlotPosition)
+                    .Select(i => (object) new Dictionary<string, object>
+                    {
+                        ["slot"] = i.SlotPosition, ["id"] = i.Id_nb, ["name"] = i.Name, ["count"] = i.Count,
+                    })
+                    .ToList();
+
+            List<object> effects = p.effectListComponent.GetEffects()
+                .Select(e => (object) new Dictionary<string, object>
+                {
+                    ["name"] = e.Name,
+                    ["type"] = e.EffectType.ToString(),
+                    ["spell"] = e.SpellHandler?.Spell?.Name,
+                    ["icon"] = (int) e.Icon,
+                    ["remainingMs"] = e.GetRemainingTimeForClient(), // 0: no duration
+                })
+                .ToList();
+
+            long money = p.GetCurrentMoney();
             return new Dictionary<string, object>
             {
                 ["name"] = p.Name,
@@ -375,7 +403,15 @@ namespace OpenDaocTools.Scripts
                 ["level"] = (int) p.Level,
                 ["class"] = p.CharacterClass?.Name,
                 ["realm"] = RealmName(p.Realm),
-                ["money"] = p.GetCurrentMoney(),
+                ["clientState"] = p.Client?.ClientState.ToString(),
+                ["linkDead"] = p.Client?.ClientState == GameClient.eClientState.Linkdead,
+                ["position"] = position,
+                ["alive"] = p.IsAlive,
+                ["health"] = p.Health, ["maxHealth"] = p.MaxHealth,
+                ["mana"] = p.Mana, ["maxMana"] = p.MaxMana,
+                ["endurance"] = p.Endurance, ["maxEndurance"] = p.MaxEndurance,
+                ["money"] = money,
+                ["moneyText"] = Money.GetString(money),
                 ["realmPoints"] = p.RealmPoints,
                 // Core's VerifySpecPoints respecs an ordinary player whose total is negative; the
                 // client's own points update reads it the same way, so reading it here adds no risk.
@@ -386,6 +422,8 @@ namespace OpenDaocTools.Scripts
                         ["key"] = s.KeyName, ["name"] = s.Name, ["level"] = s.Level, ["trainable"] = s.Trainable,
                     })
                     .ToList(),
+                ["inventory"] = inventory,
+                ["effects"] = effects,
             };
         }
 
@@ -456,16 +494,138 @@ namespace OpenDaocTools.Scripts
             return SpecResult(p, spec, before, saved: true, changed: true);
         }
 
+        // Region, x, y, z and an optional heading (0-4095; default: keep the current one).
+        private static object PlayerMove(Request req)
+        {
+            string name = StringArg(req, "name");
+            int region = IntArg(req, "region"), x = IntArg(req, "x"), y = IntArg(req, "y"), z = IntArg(req, "z");
+            int? heading = OptIntArg(req, "heading");
+            bool queue = BoolArg(req, "queue", false);
+            CheckPosition(region, x, y, heading);
+
+            GamePlayer p = InWorld(name);
+            if (p != null)
+            {
+                object result = Move(p, region, x, y, z, heading, out object before, out object after, out bool changed);
+                if (changed) Audit(req, before, after, result);
+                return result;
+            }
+
+            if (!queue)
+                throw new OpError("not_online", name + " is not online (queue=true applies it at their next login)");
+            DbCoreCharacter ch = SavedCharacter(name);
+            var args = new Dictionary<string, object>
+            {
+                ["region"] = (double) region, ["x"] = (double) x, ["y"] = (double) y, ["z"] = (double) z,
+            };
+            if (heading != null) args["heading"] = (double) heading.Value;
+            Dictionary<string, object> pending = QueueEdit(req, ch, args, _ => true, out string replaced);
+
+            // The saved Direction can carry a flag above the 12 heading bits (lab: 7212 for heading 3116).
+            var saved = Pos(ch.Region, ch.Xpos, ch.Ypos, ch.Zpos, ch.Direction & 0xFFF);
+            var to = Pos(region, x, y, z, 0);
+            to["heading"] = heading; // null: keep the heading the character has after login
+            var queued = new Dictionary<string, object>
+            {
+                ["queued"] = true, ["pendingId"] = pending["id"], ["name"] = ch.Name, ["saved"] = saved, ["to"] = to,
+                ["replaced"] = replaced,
+                ["note"] = "applied once the character is in the world: it appears at the saved position, then moves",
+            };
+            Audit(req, saved, to, queued, "queued");
+            return queued;
+        }
+
+        // GamePlayer.MoveTo, as /jump uses it: it checks the server rules, handles houses, steeds, siege
+        // weapons and pets, and sends the region change or the jump. The position is then saved at once.
+        private static object Move(GamePlayer p, int region, int x, int y, int z, int? heading,
+            out object before, out object after, out bool changed)
+        {
+            CheckPosition(region, x, y, heading);
+            before = Pos(p.CurrentRegionID, p.X, p.Y, p.Z, p.Heading);
+            ushort h = (ushort) (heading ?? p.Heading);
+            bool regionChanged = p.CurrentRegionID != region;
+            changed = regionChanged || p.X != x || p.Y != y || p.Z != z || p.Heading != h;
+
+            if (changed)
+            {
+                if (!p.MoveTo((ushort) region, x, y, z, h))
+                    throw new OpError("invalid", "Core refused the move: the server rules don't let " + p.Name +
+                        " into region " + region + ", or the player couldn't leave their region");
+                p.Out.SendMessage("An administrator moved you.", eChatType.CT_Important, eChatLoc.CL_SystemWindow);
+                p.SaveIntoDatabase();
+            }
+
+            after = Pos(region, x, y, z, h);
+            return new Dictionary<string, object>
+            {
+                ["name"] = p.Name, ["before"] = before, ["after"] = after, ["changed"] = changed,
+                ["regionChanged"] = changed && regionChanged, ["saved"] = changed,
+            };
+        }
+
+        // An absolute amount: args.amount in copper, or any of mithril, platinum, gold, silver, copper.
+        private static object PlayerMoneySet(Request req)
+        {
+            string name = StringArg(req, "name");
+            long amount = MoneyArg(req);
+            bool queue = BoolArg(req, "queue", false);
+
+            GamePlayer p = InWorld(name);
+            if (p != null)
+            {
+                object result = SetMoney(p, amount, out long before, out bool changed);
+                if (changed) Audit(req, before, amount, result);
+                return result;
+            }
+
+            if (!queue)
+                throw new OpError("not_online", name + " is not online (queue=true applies it at their next login)");
+            DbCoreCharacter ch = SavedCharacter(name);
+            Dictionary<string, object> pending = QueueEdit(req, ch,
+                new Dictionary<string, object> { ["amount"] = (double) amount }, _ => true, out string replaced);
+            long saved = SavedMoney(ch);
+            var queued = new Dictionary<string, object>
+            {
+                ["queued"] = true, ["pendingId"] = pending["id"], ["name"] = ch.Name,
+                ["saved"] = saved, ["amount"] = amount, ["amountText"] = Money.GetString(amount), ["replaced"] = replaced,
+                ["note"] = "money is shared by the account's characters in one realm; this applies when " + ch.Name +
+                           " enters the world",
+            };
+            Audit(req, saved, amount, queued, "queued");
+            return queued;
+        }
+
+        // AddMoney and RemoveMoney send the money update; SaveIntoDatabase writes accountxmoney.
+        private static object SetMoney(GamePlayer p, long amount, out long before, out bool changed)
+        {
+            before = p.GetCurrentMoney();
+            changed = amount != before;
+            if (changed)
+            {
+                if (amount > before)
+                    p.AddMoney(amount - before);
+                else if (!p.RemoveMoney(before - amount))
+                    throw new OpError("failed", "Core refused to remove " + (before - amount) + " copper");
+                p.Out.SendMessage("An administrator set your money to " + Money.GetString(amount) + ".",
+                    eChatType.CT_Important, eChatLoc.CL_SystemWindow);
+                p.SaveIntoDatabase();
+            }
+
+            long after = p.GetCurrentMoney();
+            return new Dictionary<string, object>
+            {
+                ["name"] = p.Name, ["before"] = before, ["after"] = after, ["afterText"] = Money.GetString(after),
+                ["changed"] = changed, ["saved"] = changed,
+            };
+        }
+
         // ---- queued edits to characters that aren't in the world ---------------------------------
         // The store is a list of JSON objects in <socket dir>/admin-pending.json. Only jobs on the
         // game loop (Drain) read or write it, so it needs no lock.
 
         private static object QueueSpec(Request req, string name, string specName, int level)
         {
-            List<Dictionary<string, object>> store = PendingStore();
-            DbCoreCharacter ch = DOLDB<DbCoreCharacter>.SelectObject(DB.Column("Name").IsEqualTo(name));
-            if (ch == null)
-                throw new OpError("not_found", "no character named " + name);
+            DbCoreCharacter ch = SavedCharacter(name);
 
             // Match against the saved specs first: SkillBase.GetSpecialization throws on an unknown key
             // in Core 0ac41d443 (it dereferences the result before its null check).
@@ -489,29 +649,9 @@ namespace OpenDaocTools.Scripts
             if (level < 1 || level > ch.Level)
                 throw new OpError("invalid", "level must be 1 to " + ch.Level + " (the character's level)");
 
-            string replaced = null;
-            int at = store.FindIndex(e => (string) e["characterId"] == ch.ObjectId && (string) e["op"] == req.Op &&
-                ((string) ((Dictionary<string, object>) e["args"])["spec"]).Equals(key, StringComparison.OrdinalIgnoreCase));
-            var pending = new Dictionary<string, object>
-            {
-                ["id"] = NewPendingId(store),
-                ["characterId"] = ch.ObjectId,
-                ["name"] = ch.Name,
-                ["op"] = req.Op,
-                ["args"] = new Dictionary<string, object> { ["spec"] = key, ["level"] = (double) level },
-                ["queuedAt"] = DateTime.UtcNow.ToString("o"),
-                ["actor"] = req.Actor,
-                ["peerUid"] = (double) req.PeerUid,
-            };
-            var previous = new List<Dictionary<string, object>>(store);
-            if (at >= 0)
-            {
-                replaced = (string) store[at]["id"];
-                store[at] = pending; // keeps its place in the order
-            }
-            else
-                store.Add(pending);
-            SavePendingOrRollBack(previous);
+            Dictionary<string, object> pending = QueueEdit(req, ch,
+                new Dictionary<string, object> { ["spec"] = key, ["level"] = (double) level },
+                a => Get(a, "spec") is string k && k.Equals(key, StringComparison.OrdinalIgnoreCase), out string replaced);
 
             var result = new Dictionary<string, object>
             {
@@ -520,6 +660,56 @@ namespace OpenDaocTools.Scripts
             };
             Audit(req, savedLevel, level, result, "queued");
             return result;
+        }
+
+        // Adds one pending edit. An edit for the same character and op whose args match sameTarget
+        // replaces the older one and keeps its place in the order.
+        private static Dictionary<string, object> QueueEdit(Request req, DbCoreCharacter ch, Dictionary<string, object> args,
+            Func<Dictionary<string, object>, bool> sameTarget, out string replaced)
+        {
+            List<Dictionary<string, object>> store = PendingStore();
+            replaced = null;
+            int at = store.FindIndex(e => (string) e["characterId"] == ch.ObjectId && (string) e["op"] == req.Op &&
+                sameTarget((Dictionary<string, object>) e["args"]));
+            var pending = new Dictionary<string, object>
+            {
+                ["id"] = NewPendingId(store),
+                ["characterId"] = ch.ObjectId,
+                ["name"] = ch.Name,
+                ["op"] = req.Op,
+                ["args"] = args,
+                ["queuedAt"] = DateTime.UtcNow.ToString("o"),
+                ["actor"] = req.Actor,
+                ["peerUid"] = (double) req.PeerUid,
+            };
+            var previous = new List<Dictionary<string, object>>(store);
+            if (at >= 0)
+            {
+                replaced = (string) store[at]["id"];
+                store[at] = pending;
+            }
+            else
+                store.Add(pending);
+            SavePendingOrRollBack(previous);
+            return pending;
+        }
+
+        private static DbCoreCharacter SavedCharacter(string name)
+        {
+            PendingStore(); // refuse before the lookup if queued edits are off
+            return DOLDB<DbCoreCharacter>.SelectObject(DB.Column("Name").IsEqualTo(name))
+                ?? throw new OpError("not_found", "no character named " + name);
+        }
+
+        // The realm's money as the next login will load it: accountxmoney, else the character's own columns.
+        private static long SavedMoney(DbCoreCharacter ch)
+        {
+            DbAccount account = DOLDB<DbAccount>.SelectObject(DB.Column("Name").IsEqualTo(ch.AccountName));
+            DbAccountXMoney row = account == null ? null : DOLDB<DbAccountXMoney>.SelectObject(
+                DB.Column("AccountID").IsEqualTo(account.ObjectId).And(DB.Column("Realm").IsEqualTo(ch.Realm)));
+            return row != null
+                ? Money.GetMoney(row.Mithril, row.Platinum, row.Gold, row.Silver, row.Copper)
+                : Money.GetMoney(ch.Mithril, ch.Platinum, ch.Gold, ch.Silver, ch.Copper);
         }
 
         // GameEntered fires inside the player-init packet handler, on a client-packet thread: only enqueue.
@@ -533,7 +723,9 @@ namespace OpenDaocTools.Scripts
         {
             if (_pending == null || p.DBCharacter == null) return;
             string id = p.DBCharacter.ObjectId;
-            List<Dictionary<string, object>> mine = _pending.Where(e => (string) e["characterId"] == id).ToList();
+            // In queue order, except moves last: a move to another region takes the player out of the world.
+            List<Dictionary<string, object>> mine = _pending.Where(e => (string) e["characterId"] == id)
+                .OrderBy(e => (string) e["op"] == "player.move" ? 1 : 0).ToList();
             if (mine.Count == 0) return;
             if (p.ObjectState != GameObject.eObjectState.Active || !p.EnteredGame) return; // gone again: keep them
 
@@ -549,8 +741,29 @@ namespace OpenDaocTools.Scripts
                 {
                     // Edits set absolute values: if the server stops after this save but before the store
                     // is rewritten, applying the entry again at the next login changes nothing.
-                    object result = SetSpec(p, StringArg(req, "spec"), IntArg(req, "level"), out int before, out _);
-                    Audit(req, before, IntArg(req, "level"), result, "applied");
+                    object before, after, result;
+                    switch (req.Op)
+                    {
+                        case "player.spec.set":
+                            int level = IntArg(req, "level");
+                            result = SetSpec(p, StringArg(req, "spec"), level, out int specBefore, out _);
+                            before = specBefore;
+                            after = level;
+                            break;
+                        case "player.move":
+                            result = Move(p, IntArg(req, "region"), IntArg(req, "x"), IntArg(req, "y"), IntArg(req, "z"),
+                                OptIntArg(req, "heading"), out before, out after, out _);
+                            break;
+                        case "player.money.set":
+                            long amount = MoneyArg(req);
+                            result = SetMoney(p, amount, out long moneyBefore, out _);
+                            before = moneyBefore;
+                            after = amount;
+                            break;
+                        default:
+                            throw new OpError("invalid", "no way to apply a queued '" + req.Op + "'");
+                    }
+                    Audit(req, before, after, result, "applied");
                 }
                 catch (OpError oe)
                 {
@@ -754,6 +967,53 @@ namespace OpenDaocTools.Scripts
                 throw new OpError("bad_request", "args." + key + " (integer) is required");
             return (int) d;
         }
+
+        private static int? OptIntArg(Request req, string key) =>
+            req.Args.TryGetValue(key, out object v) && v != null ? IntArg(req, key) : null;
+
+        // Money's largest value: Core keeps each denomination modulo its next one (Money.GetMithril: % 1000).
+        private static readonly long MaxMoney = Money.GetMoney(999, 999, 999, 99, 99);
+
+        private static long MoneyArg(Request req)
+        {
+            long total;
+            if (req.Args.ContainsKey("amount"))
+            {
+                if (req.Args["amount"] is not double d || d != Math.Floor(d) || d < 0 || d > MaxMoney)
+                    throw new OpError("bad_request", "args.amount must be a whole number of copper, 0 to " + MaxMoney);
+                total = (long) d;
+            }
+            else
+            {
+                string[] parts = { "mithril", "platinum", "gold", "silver", "copper" };
+                if (!parts.Any(req.Args.ContainsKey))
+                    throw new OpError("bad_request", "give args.amount (copper) or any of " + string.Join(", ", parts));
+                int[] n = parts.Select(k => OptIntArg(req, k) ?? 0).ToArray();
+                if (n.Any(v => v < 0))
+                    throw new OpError("bad_request", "money parts can't be negative");
+                total = Money.GetMoney(n[0], n[1], n[2], n[3], n[4]);
+            }
+            if (total > MaxMoney)
+                throw new OpError("invalid", "at most " + Money.GetString(MaxMoney));
+            return total;
+        }
+
+        // A position Core can put a player at: a loaded region with a zone under x, y.
+        private static void CheckPosition(int region, int x, int y, int? heading)
+        {
+            Region rgn = region is >= 0 and <= ushort.MaxValue ? WorldMgr.GetRegion((ushort) region) : null;
+            if (rgn == null)
+                throw new OpError("invalid", "no region " + region + " is loaded");
+            if (rgn.GetZone(x, y) == null)
+                throw new OpError("invalid", "region " + region + " (" + rgn.Description + ") has no zone at x " + x + ", y " + y);
+            if (heading is < 0 or > 4095)
+                throw new OpError("invalid", "heading must be 0 to 4095");
+        }
+
+        private static Dictionary<string, object> Pos(int region, int x, int y, int z, int heading) => new()
+        {
+            ["region"] = region, ["x"] = x, ["y"] = y, ["z"] = z, ["heading"] = heading,
+        };
 
         private static void Audit(Request req, object before, object after, object result, string phase = null)
         {

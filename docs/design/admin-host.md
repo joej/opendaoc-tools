@@ -96,8 +96,9 @@ fields copy their property when their class loads, so `Properties.Refresh()` nev
 ## Not in the first slice
 
 - Offline character edits: queued and applied at the next login, see
-  [queued edits](admin-host-queued-edits.md). Level, realm points, money, items, position. Each needs
-  its own "what the client must be told" check, as specs did.
+  [queued edits](admin-host-queued-edits.md). Position and money since 2026-11-24
+  ([move and money](admin-host-move-money.md)). Level, realm points and items: each needs its own
+  "what the client must be told" check, as specs did.
 - Kick, mute, broadcast, the appeal queue.
 - The HTTP front for web tools, and any non-loopback access.
 - Staging-diff apply (gap 3).
