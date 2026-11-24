@@ -9,6 +9,7 @@
 // An edit to a character that isn't in the world can be queued (queue=true) and is applied when the
 // character next enters the world: docs/design/admin-host-queued-edits.md. Pending edits are kept in
 // admin-pending.json next to the socket. Moving a player and setting money: docs/design/admin-host-move-money.md.
+// Revive, items and level: docs/design/admin-host-revive-items-level.md.
 //
 // Every operation runs on the game loop: the host posts one action per tick to ClientService, whose
 // posted actions finish before any client's packets for that tick are handled. Every change is
@@ -332,6 +333,9 @@ namespace OpenDaocTools.Scripts
             ["player.spec.set"] = new OpSpec { Run = PlayerSpecSet },
             ["player.move"] = new OpSpec { Run = PlayerMove },
             ["player.money.set"] = new OpSpec { Run = PlayerMoneySet },
+            ["player.revive"] = new OpSpec { Run = PlayerRevive },
+            ["player.item.set"] = new OpSpec { Run = PlayerItemSet },
+            ["player.level.set"] = new OpSpec { Run = PlayerLevelSet },
             ["player.pending"] = new OpSpec { Run = PlayerPending },
             ["player.pending.cancel"] = new OpSpec { Run = PlayerPendingCancel },
             ["cache.reload"] = new OpSpec { Run = CacheReload },
@@ -619,6 +623,224 @@ namespace OpenDaocTools.Scripts
             };
         }
 
+        // Online only: being dead doesn't outlast a session. A dead player is raised where they lie, as a
+        // resurrection spell does it but at full health, power and endurance and without resurrection
+        // illness. A living one is healed, as /heal does. clearPenalty also ends resurrection illness,
+        // restores constitution lost at death and resets the death count (which scales the next death's
+        // penalty). It doesn't give back experience: Core records the loss it meant to take
+        // (DEATH_EXP_LOSS_PROPERTY), not what it took after stopping at the start of the level, so giving
+        // that back could add experience that was never lost.
+        private static object PlayerRevive(Request req)
+        {
+            GamePlayer p = OnlinePlayer(req);
+            bool clearPenalty = BoolArg(req, "clearPenalty", false);
+            bool wasDead = !p.IsAlive;
+            int conRestored = 0, illnessEnded = 0, deathCount = p.DeathCount;
+
+            // First, so that the heal below fills the maximum health the restored constitution gives.
+            if (clearPenalty)
+            {
+                foreach (ECSGameEffect effect in p.effectListComponent.GetEffects())
+                {
+                    if (effect.EffectType is eEffect.ResurrectionIllness or eEffect.RvrResurrectionIllness)
+                    {
+                        effect.End();
+                        illnessEnded++;
+                    }
+                }
+                conRestored = p.TotalConstitutionLostAtDeath;
+                if (conRestored > 0)
+                {
+                    p.TotalConstitutionLostAtDeath = 0; // as the healer NPC does
+                    p.Out.SendCharStatsUpdate();
+                }
+                p.DeathCount = 0;
+            }
+
+            if (wasDead)
+            {
+                // Constitution is only charged when the player releases; a resurrection never charges it.
+                p.TempProperties.RemoveProperty(GamePlayer.DEATH_CONSTITUTION_LOSS_PROPERTY);
+                // OnRevive (registered at death) skips resurrection illness when this is 0, and unregisters itself.
+                p.TempProperties.SetProperty(GamePlayer.RESURRECT_REZ_SICK_EFFECTIVENESS, 0.0);
+                p.Notify(GamePlayerEvent.Revive, p);
+                p.Health = p.MaxHealth;
+                p.Mana = p.MaxMana;
+                p.Endurance = p.MaxEndurance;
+                p.StopReleaseTimer();
+                p.Out.SendPlayerRevive(p);
+                p.StartPowerRegeneration();
+                p.StartEnduranceRegeneration();
+            }
+            else
+            {
+                p.Health = p.MaxHealth;
+                p.Mana = p.MaxMana;
+                p.Endurance = p.MaxEndurance;
+            }
+
+
+            p.Out.SendMessage(wasDead ? "An administrator revived you." : "An administrator healed you.",
+                eChatType.CT_Important, eChatLoc.CL_SystemWindow);
+            p.SaveIntoDatabase();
+
+            var result = new Dictionary<string, object>
+            {
+                ["name"] = p.Name, ["wasDead"] = wasDead, ["alive"] = p.IsAlive,
+                ["health"] = p.Health, ["mana"] = p.Mana, ["endurance"] = p.Endurance,
+                ["conRestored"] = conRestored, ["illnessEnded"] = illnessEnded,
+                ["deathCount"] = (int) p.DeathCount, ["deathCountBefore"] = deathCount,
+            };
+            Audit(req, wasDead ? "dead" : "alive", "alive", result);
+            return result;
+        }
+
+        // The count of one item template in the backpack, set to an absolute number: items are added
+        // (stacked where they fit) as a merchant sale adds them, or removed as Core removes a template.
+        private static object PlayerItemSet(Request req)
+        {
+            string name = StringArg(req, "name");
+            DbItemTemplate template = ItemTemplate(StringArg(req, "id"));
+            int count = IntArg(req, "count");
+            if (count < 0 || count > MaxItemCount)
+                throw new OpError("invalid", "count must be 0 to " + MaxItemCount);
+            bool queue = BoolArg(req, "queue", false);
+
+            GamePlayer p = InWorld(name);
+            if (p != null)
+            {
+                object result = SetItems(p, template, count, out int before, out bool changed);
+                if (changed) Audit(req, before, count, result);
+                return result;
+            }
+
+            if (!queue)
+                throw new OpError("not_online", name + " is not online (queue=true applies it at their next login)");
+            DbCoreCharacter ch = SavedCharacter(name);
+            Dictionary<string, object> pending = QueueEdit(req, ch,
+                new Dictionary<string, object> { ["id"] = template.Id_nb, ["count"] = (double) count },
+                a => Get(a, "id") is string k && k.Equals(template.Id_nb, StringComparison.OrdinalIgnoreCase), out string replaced);
+            int saved = SavedItemCount(ch, template.Id_nb);
+            var queued = new Dictionary<string, object>
+            {
+                ["queued"] = true, ["pendingId"] = pending["id"], ["name"] = ch.Name, ["id"] = template.Id_nb,
+                ["item"] = template.Name, ["saved"] = saved, ["count"] = count, ["replaced"] = replaced,
+                ["note"] = "whether the items fit in the backpack is checked when they are applied",
+            };
+            Audit(req, saved, count, queued, "queued");
+            return queued;
+        }
+
+        // A backpack of 40 slots, each holding at most one full stack.
+        private const int MaxItemCount = 40 * 1000;
+
+        private static object SetItems(GamePlayer p, DbItemTemplate template, int count, out int before, out bool changed)
+        {
+            const eInventorySlot first = eInventorySlot.FirstBackpack, last = eInventorySlot.LastBackpack;
+            before = p.Inventory.CountItemTemplate(template.Id_nb, first, last);
+            changed = count != before;
+            if (count > before)
+            {
+                // All or nothing: AddTemplate checks that everything fits before it adds anything.
+                if (!p.Inventory.AddTemplate(GameInventoryItem.Create(template), count - before, first, last))
+                    throw new OpError("invalid", "adding " + (count - before) + " " + template.Name + " doesn't fit in " +
+                        p.Name + "'s backpack (" + p.Inventory.CountSlots(false, first, last) + " free slots)");
+                InventoryLogging.LogInventoryAction("(admin host)", p, eInventoryActionType.Other, template, count - before);
+            }
+            else if (count < before)
+            {
+                if (!p.Inventory.RemoveTemplate(template.Id_nb, before - count, first, last))
+                    throw new OpError("failed", "Core refused to remove " + (before - count) + " " + template.Name);
+                InventoryLogging.LogInventoryAction(p, "(admin host)", eInventoryActionType.Other, template, before - count);
+            }
+
+            if (changed)
+            {
+                p.Out.SendMessage("An administrator set your " + template.Name + " to " + count + ".",
+                    eChatType.CT_Important, eChatLoc.CL_SystemWindow);
+                p.SaveIntoDatabase();
+            }
+            return new Dictionary<string, object>
+            {
+                ["name"] = p.Name, ["id"] = template.Id_nb, ["item"] = template.Name, ["before"] = before,
+                ["after"] = p.Inventory.CountItemTemplate(template.Id_nb, first, last), ["changed"] = changed, ["saved"] = changed,
+            };
+        }
+
+        private static DbItemTemplate ItemTemplate(string id) =>
+            GameServer.Database.FindObjectByKey<DbItemTemplate>(id)
+            ?? throw new OpError("not_found", "no item template '" + id + "'");
+
+        private static int SavedItemCount(DbCoreCharacter ch, string id) =>
+            DOLDB<DbInventoryItem>.SelectObjects(DB.Column("OwnerID").IsEqualTo(ch.ObjectId).And(DB.Column("ITemplate_Id").IsEqualTo(id)))
+                .Where(i => i.SlotPosition >= (int) eInventorySlot.FirstBackpack && i.SlotPosition <= (int) eInventorySlot.LastBackpack)
+                .Sum(i => i.Count);
+
+        // As the GM command /player level does it: raising sets Level, which runs Core's level-up (stats,
+        // spec points, abilities); lowering first resets the character to level 1, which respecs every
+        // line and realm ability, then raises it. Experience is set to the start of the new level.
+        private static object PlayerLevelSet(Request req)
+        {
+            string name = StringArg(req, "name");
+            int level = IntArg(req, "level");
+            if (level < 1 || level > GamePlayer.MAX_LEVEL)
+                throw new OpError("invalid", "level must be 1 to " + GamePlayer.MAX_LEVEL);
+            bool queue = BoolArg(req, "queue", false);
+
+            GamePlayer p = InWorld(name);
+            if (p != null)
+            {
+                object result = SetLevel(p, level, out int before, out bool changed);
+                if (changed) Audit(req, before, level, result);
+                return result;
+            }
+
+            if (!queue)
+                throw new OpError("not_online", name + " is not online (queue=true applies it at their next login)");
+            DbCoreCharacter ch = SavedCharacter(name);
+            Dictionary<string, object> pending = QueueEdit(req, ch,
+                new Dictionary<string, object> { ["level"] = (double) level }, _ => true, out string replaced);
+            var queued = new Dictionary<string, object>
+            {
+                ["queued"] = true, ["pendingId"] = pending["id"], ["name"] = ch.Name, ["saved"] = ch.Level,
+                ["level"] = level, ["replaced"] = replaced,
+                ["note"] = level < ch.Level ? "lowering a level respecs every line and realm ability" : null,
+            };
+            Audit(req, ch.Level, level, queued, "queued");
+            return queued;
+        }
+
+        private static object SetLevel(GamePlayer p, int level, out int before, out bool changed)
+        {
+            before = p.Level;
+            changed = level != before;
+            bool respecced = level < before;
+            if (changed)
+            {
+                if (respecced)
+                    p.Reset();
+                if (level > p.Level)
+                    p.Level = (byte) level;
+                p.Experience = p.ExperienceForCurrentLevel;
+                p.IsLevelSecondStage = false;
+
+                p.RefreshSpecDependantSkills(true);
+                p.Out.SendUpdatePlayer();
+                p.Out.SendUpdatePoints();
+                p.Out.SendCharStatsUpdate();
+                p.Out.SendCharResistsUpdate();
+                p.Out.SendUpdatePlayerSkills(true);
+                p.Out.SendMessage("An administrator set your level to " + level + (respecced ? "; your skills were respecced." : "."),
+                    eChatType.CT_Important, eChatLoc.CL_SystemWindow);
+                p.SaveIntoDatabase();
+            }
+            return new Dictionary<string, object>
+            {
+                ["name"] = p.Name, ["before"] = before, ["after"] = (int) p.Level, ["changed"] = changed,
+                ["respecced"] = changed && respecced, ["specPoints"] = p.SkillSpecialtyPoints, ["saved"] = changed,
+            };
+        }
+
         // ---- queued edits to characters that aren't in the world ---------------------------------
         // The store is a list of JSON objects in <socket dir>/admin-pending.json. Only jobs on the
         // game loop (Drain) read or write it, so it needs no lock.
@@ -646,8 +868,15 @@ namespace OpenDaocTools.Scripts
             Specialization spec = SkillBase.GetSpecialization(key, false);
             if (spec == null || !spec.Trainable)
                 throw new OpError("invalid", "'" + key + "' is not a trainable spec");
-            if (level < 1 || level > ch.Level)
-                throw new OpError("invalid", "level must be 1 to " + ch.Level + " (the character's level)");
+            // A queued level change applies before spec edits at login, so check against it if there is one.
+            int charLevel = ch.Level;
+            Dictionary<string, object> queuedLevel = _pending?.FirstOrDefault(e =>
+                (string) e["characterId"] == ch.ObjectId && (string) e["op"] == "player.level.set");
+            if (queuedLevel != null && ((Dictionary<string, object>) queuedLevel["args"])["level"] is double ql)
+                charLevel = (int) ql;
+            if (level < 1 || level > charLevel)
+                throw new OpError("invalid", "level must be 1 to " + charLevel + (queuedLevel != null
+                    ? " (the character's queued level)" : " (the character's level)"));
 
             Dictionary<string, object> pending = QueueEdit(req, ch,
                 new Dictionary<string, object> { ["spec"] = key, ["level"] = (double) level },
@@ -723,9 +952,10 @@ namespace OpenDaocTools.Scripts
         {
             if (_pending == null || p.DBCharacter == null) return;
             string id = p.DBCharacter.ObjectId;
-            // In queue order, except moves last: a move to another region takes the player out of the world.
+            // In queue order, except: a level change first (spec edits are checked against the level, and
+            // lowering one respecs), and moves last (a move to another region takes the player out of the world).
             List<Dictionary<string, object>> mine = _pending.Where(e => (string) e["characterId"] == id)
-                .OrderBy(e => (string) e["op"] == "player.move" ? 1 : 0).ToList();
+                .OrderBy(e => (string) e["op"] switch { "player.level.set" => 0, "player.move" => 2, _ => 1 }).ToList();
             if (mine.Count == 0) return;
             if (p.ObjectState != GameObject.eObjectState.Active || !p.EnteredGame) return; // gone again: keep them
 
@@ -759,6 +989,18 @@ namespace OpenDaocTools.Scripts
                             result = SetMoney(p, amount, out long moneyBefore, out _);
                             before = moneyBefore;
                             after = amount;
+                            break;
+                        case "player.item.set":
+                            int count = IntArg(req, "count");
+                            result = SetItems(p, ItemTemplate(StringArg(req, "id")), count, out int itemsBefore, out _);
+                            before = itemsBefore;
+                            after = count;
+                            break;
+                        case "player.level.set":
+                            int newLevel = IntArg(req, "level");
+                            result = SetLevel(p, newLevel, out int levelBefore, out _);
+                            before = levelBefore;
+                            after = newLevel;
                             break;
                         default:
                             throw new OpError("invalid", "no way to apply a queued '" + req.Op + "'");

@@ -10,6 +10,9 @@ Run it as the server's user, on the server's machine; the socket is mode 0600.
     adminctl.py player.spec.set name=LabChar spec=Slash level=5 queue=true   # offline: at next login
     adminctl.py player.move name=LabChar region=1 x=560000 y=511000 z=2500 heading=2048   # queue=true too
     adminctl.py player.money.set name=LabChar platinum=5                                   # absolute; queue=true too
+    adminctl.py player.item.set name=LabChar id=adder_venom count=20                       # backpack count; queue=true too
+    adminctl.py player.level.set name=LabChar level=20                                     # lowering respecs; queue=true too
+    adminctl.py player.revive name=LabChar clearPenalty=true                               # online only
     adminctl.py player.pending
     adminctl.py player.pending.cancel id=p-1a2b3c4d
     adminctl.py cache.reload what=item id=0_Demon_Bound_Bracelet
