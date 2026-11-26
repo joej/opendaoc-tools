@@ -1,12 +1,18 @@
-# Admin host: packet capture, for test servers only (design and test results, 2026-11-25)
+# Admin host: packet capture and sending, for test servers only (design and test results, 2026-11-25)
 
 Follows [spawns, boats and rams](admin-host-spawns.md). A client test usually needs to see what the
 client sends back, not only what the server sent. A capture records every packet one account sends
 and receives, in both directions, for a set time. It keeps the packets in memory, where the tester
 reads them with `packet.capture.get`.
 
+The counterpart is `packet.send`: it sends a server packet with any opcode and body to an online
+player. With a capture running, a tester can send an opcode that Core never sends and watch whether
+the client answers, and with what. Any undecoded opcode can be tested this way, and so can a packet
+layout before a client implements it.
+
 A capture shows everything the player sends, including chat and whispers. In the lab test the
-capture held `&say capturetest` as typed. So the ops are in their own file,
+capture held `&say capturetest` as typed. A crafted packet can crash or disconnect the client. So the
+ops are in their own file,
 [`server-scripts/admin-host-test/AdminHostPackets.cs`](../../server-scripts/admin-host-test/AdminHostPackets.cs),
 which goes only on test servers. `AdminHost.cs` on its own has no capture ops.
 
@@ -34,6 +40,7 @@ restart. To remove it, delete the file and restart.
 | `packet.capture.stop` | `id` | Stops it early; `changed: false` if it had already stopped |
 | `packet.capture.list` | | Every stored capture, and whether Core is tracing at all (`traceOn`) |
 | `packet.capture.delete` | `id`, or `all=true` | Stops and forgets it |
+| `packet.send` | `name` (an online player), `opcode` (hex), optional `body` (hex, up to 4096 bytes), `udp`, `capture` (a capture id) | Sends one server packet; returns the opcode, its name if Core has one, the length and the transport |
 
 Each packet comes back as `n`, `time`, `connection`, `dir`, `transport` (TCP or UDP), `opcode`,
 `name`, `length` and `body` (hex). The name is Core's own (`eServerPackets` for S>C,
@@ -42,6 +49,17 @@ connection events, with `-` as the opcode and text as the body.
 
 `opcode` is read as hex: `A1`, `0xA1` or `12`. `adminctl.py` sends `opcode=12` as the number 12, and
 the op reads a number's digits as hex, so `opcode=12` means 0x12.
+
+**Sending.** `packet.send` builds the packet as Core's own packet code does: a pooled
+`GSTCPPacketOut` (or `GSUDPPacketOut` with `udp=true`) with the opcode, then the body bytes as given,
+queued to the client. Core writes the size and encrypts it as any other packet, and doesn't remap
+the opcode. With `udp=true` the packet goes the way Core sends its own UDP packets, over TCP when
+the client has no UDP channel; the capture shows which was used. The body is hex digits, with
+optional spaces and `0x`. A number is refused, because `adminctl.py` would have dropped its leading
+zeros (`body=0012` arrives as 12); with `adminctl.py`, start the body with `0x`. With
+`capture=<id>`, the send first adds an `EVT` line to that capture (`packet.send by <actor>: <opcode>,
+<n> bytes`). The capture must be running on the same player's account. The reply to the packet
+comes right after it in the capture. Each send writes an audit line with the opcode and body.
 
 **Before login.** `account` need not be logged in, so a capture started first records the login. Core
 labels a connection with its account only once the login is accepted. The capture starts at
@@ -90,6 +108,8 @@ On the lab copy with the headless client (`DaocCli`), logging LabChar in during 
 | Busy | A 5th running capture refused (`busy`); `delete all=true` cleared all 6, then `traceOn: false` |
 | Refusals | Neither or both of `name` and `account`; an unknown account; `name` of a player who isn't online; `seconds=0`; `max=99999`; an unknown id; `dir=X`; `opcode` `ZZ` and `123` |
 | Audit | Start, get (with `returned`, not the packets), stop and delete each wrote a line |
+| Send | With a capture running: 0xD5 with no body, 0x4D with 19 bytes and 0xED with 4 bytes and `udp=true`. The capture held each marker line and then the packet, body as sent; 0xED went over TCP (the headless client has no UDP channel). The client logged `[D5] 3 bytes`, `[4D] 22 bytes` and `[ED] 7 bytes` (with the 2-byte size and the opcode) and stayed connected. One audit line per send |
+| Send refusals | No `name`; a player who isn't online; no `opcode`; `opcode=ZZ`; an odd number of digits; non-hex digits; `body=0012` (a number); 4097 bytes; an unknown capture id |
 
-Not tested: a real client, a capture across a zone change, and a `logconfig.xml` reload during a
-capture.
+Not tested: a real client (how it reacts to the opcodes above), a send over a real UDP channel, a
+capture across a zone change, and a `logconfig.xml` reload during a capture.

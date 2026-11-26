@@ -1,9 +1,10 @@
-// AdminHostPackets -- TEST SERVERS ONLY. Adds packet capture to AdminHost.
+// AdminHostPackets -- TEST SERVERS ONLY. Adds packet capture and packet sending to AdminHost.
 //
 // Design: docs/design/admin-host-packets.md. A capture records every packet one account sends and
 // receives, in both directions, for a set time, and keeps it in memory for packet.capture.get.
-// It shows everything the player sends, chat and whispers included, so never install this file on a
-// server that real players use.
+// It shows everything the player sends, chat and whispers included. packet.send sends a server packet
+// with any opcode and body to an online player, which can crash or disconnect their client. Never
+// install this file on a server that real players use.
 //
 // It uses Core's PacketTrace (GameServer/packets/Server/PacketTrace.cs), which logs one line per
 // packet at Trace level to the NLog logger "DOL.GS.PacketTrace" and masks the login password and the
@@ -42,6 +43,7 @@ namespace OpenDaocTools.Scripts
             ops["packet.capture.stop"] = new OpSpec { Run = CaptureStop };
             ops["packet.capture.list"] = new OpSpec { Run = CaptureList };
             ops["packet.capture.delete"] = new OpSpec { Run = CaptureDelete };
+            ops["packet.send"] = new OpSpec { Run = PacketSend };
         }
 
         static partial void StopExtras()
@@ -151,18 +153,7 @@ namespace OpenDaocTools.Scripts
             string dir = OptStringArg(req, "dir");
             if (dir != null && dir != "C>S" && dir != "S>C" && dir != "EVT")
                 throw new OpError("invalid", "args.dir must be C>S, S>C or EVT");
-            // Hex. A number is read as its digits (adminctl.py sends opcode=12 as 12, meaning 0x12).
-            string opcode = Get(req.Args, "opcode") switch
-            {
-                null => null,
-                double d when d >= 0 && d == Math.Floor(d) => ((long) d).ToString(CultureInfo.InvariantCulture),
-                string s => s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? s.Substring(2) : s,
-                _ => "?",
-            };
-            opcode = opcode?.ToUpperInvariant();
-            if (opcode != null && !byte.TryParse(opcode, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out _))
-                throw new OpError("invalid", "args.opcode must be a hex byte, such as A1");
-            if (opcode != null) opcode = opcode.PadLeft(2, '0');
+            string opcode = OpcodeArg(req)?.ToString("X2", CultureInfo.InvariantCulture);
 
             var lines = new List<object>();
             int next;
@@ -235,6 +226,104 @@ namespace OpenDaocTools.Scripts
             var result = new Dictionary<string, object> { ["deleted"] = deleted };
             Audit(req, null, null, result);
             return result;
+        }
+
+        private const int MaxSendBody = 4096;
+
+        // One server packet with the given opcode and body, framed and encrypted by Core as any other.
+        private static object PacketSend(Request req)
+        {
+            GamePlayer p = OnlinePlayer(req);
+            GameClient client = p.Client ?? throw new OpError("failed", p.Name + " has no client");
+            byte code = OpcodeArg(req) ?? throw new OpError("bad_request", "args.opcode (hex) is required");
+            byte[] body = HexArg(req, "body");
+            bool udp = BoolArg(req, "udp", false);
+
+            // Optional: mark the send in a running capture of this player's account, just before the packet.
+            Capture mark = null;
+            string markId = OptStringArg(req, "capture");
+            if (markId != null)
+            {
+                mark = CaptureById(req, "capture");
+                if (!mark.Running || !string.Equals(mark.Account, client.Account?.Name, StringComparison.OrdinalIgnoreCase))
+                    throw new OpError("invalid", "capture " + markId + " isn't running on " + p.Name + "'s account");
+            }
+
+            var result = new Dictionary<string, object>
+            {
+                ["name"] = p.Name,
+                ["account"] = client.Account?.Name,
+                ["opcode"] = code.ToString("X2", CultureInfo.InvariantCulture),
+                ["opcodeName"] = OpcodeName("S>C", code.ToString("X2", CultureInfo.InvariantCulture)),
+                ["length"] = body.Length,
+                ["transport"] = udp ? "UDP" : "TCP",
+            };
+
+            if (mark != null)
+                lock (_capLock)
+                {
+                    result["captureLine"] = mark.Lines.Count;
+                    mark.Lines.Add(new[]
+                    {
+                        DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
+                        "-", mark.Account, "EVT", "-", "-", "0",
+                        "packet.send by " + (req.Actor ?? "unknown") + ": " + result["opcode"] + ", " + body.Length + " bytes",
+                    });
+                }
+
+            if (udp)
+            {
+                GSUDPPacketOut pak = GameLoop.GetObjectForTick<GSUDPPacketOut>().Init(code);
+                pak.Write(body, 0, body.Length);
+                client.Out.SendUDP(pak); // as Core sends its own UDP packets: over TCP when UDP is not available
+            }
+            else
+            {
+                GSTCPPacketOut pak = GameLoop.GetObjectForTick<GSTCPPacketOut>().Init(code);
+                pak.Write(body, 0, body.Length);
+                client.Out.SendTCP(pak);
+            }
+
+            Audit(req, null, null, result);
+            return result;
+        }
+
+        // Hex. A number is read as its digits (adminctl.py sends opcode=12 as 12, meaning 0x12).
+        private static byte? OpcodeArg(Request req)
+        {
+            string text = Get(req.Args, "opcode") switch
+            {
+                null => null,
+                double d when d >= 0 && d == Math.Floor(d) => ((long) d).ToString(CultureInfo.InvariantCulture),
+                string s => s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? s.Substring(2) : s,
+                _ => "?",
+            };
+            if (text == null) return null;
+            if (!byte.TryParse(text, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out byte code))
+                throw new OpError("invalid", "args.opcode must be a hex byte, such as A1");
+            return code;
+        }
+
+        // Hex digits, spaces allowed, optional 0x; missing or empty is an empty body. A number is refused: its
+        // leading zeros are gone (adminctl.py sends digits-only values as numbers; body=0x0012 stays text).
+        private static byte[] HexArg(Request req, string key)
+        {
+            string text = Get(req.Args, key) switch
+            {
+                null => "",
+                string s => s,
+                double => throw new OpError("invalid", "args." + key + " must be a string of hex digits; " +
+                    "a number loses its leading zeros (with adminctl.py, start it with 0x)"),
+                _ => throw new OpError("invalid", "args." + key + " must be hex digits"),
+            };
+            text = text.Replace(" ", "");
+            if (text.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) text = text.Substring(2);
+            if (text.Length % 2 != 0)
+                throw new OpError("invalid", "args." + key + " must have an even number of hex digits");
+            if (text.Length / 2 > MaxSendBody)
+                throw new OpError("invalid", "args." + key + " is longer than " + MaxSendBody + " bytes");
+            try { return Convert.FromHexString(text); }
+            catch (FormatException) { throw new OpError("invalid", "args." + key + " must be hex digits"); }
         }
 
         // ---- capturing ---------------------------------------------------------------------------
@@ -340,9 +429,9 @@ namespace OpenDaocTools.Scripts
                 _captures.Remove(c.Id);
         }
 
-        private static Capture CaptureById(Request req)
+        private static Capture CaptureById(Request req, string key = "id")
         {
-            string id = StringArg(req, "id");
+            string id = StringArg(req, key);
             lock (_capLock)
                 return _captures.TryGetValue(id, out Capture c) ? c : throw new OpError("not_found", "no capture " + id);
         }

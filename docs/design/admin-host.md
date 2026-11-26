@@ -103,7 +103,7 @@ fields copy their property when their class loads, so `Properties.Refresh()` nev
 - Kick, mute, broadcast, the appeal queue.
 - Objects for client tests: NPCs, boats and rams since 2026-11-25 ([spawns](admin-host-spawns.md)).
   Other siege weapons, a casting mob and pets: still to do. Packet capture: a separate test-only
-  script, [admin-host-packets.md](admin-host-packets.md). Raw packets: still to do, in the same place.
+  script, [admin-host-packets.md](admin-host-packets.md). Sending a crafted packet: the same script.
 - The HTTP front for web tools, and any non-loopback access.
 - Staging-diff apply (gap 3).
 

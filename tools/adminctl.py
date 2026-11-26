@@ -22,6 +22,7 @@ Run it as the server's user, on the server's machine; the socket is mode 0600.
     adminctl.py player.pending.cancel id=p-1a2b3c4d
     adminctl.py packet.capture.start account=labprobe seconds=60                         # test servers only
     adminctl.py packet.capture.get id=c-1a2b3c4d 'dir=S>C' opcode=12
+    adminctl.py packet.send name=LabChar opcode=D5 body=0x capture=c-1a2b3c4d                # test servers only
     adminctl.py cache.reload what=item id=0_Demon_Bound_Bracelet
 
 Arguments are key=value; a whole number is sent as a number, true and false as booleans. Socket: --socket, else
