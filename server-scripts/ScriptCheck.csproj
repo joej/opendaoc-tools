@@ -40,6 +40,9 @@
     <Reference Include="GameServer"><HintPath>$(CoreLibs)/GameServer.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="CoreBase"><HintPath>$(CoreLibs)/CoreBase.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="CoreDatabase"><HintPath>$(CoreLibs)/CoreDatabase.dll</HintPath><Private>false</Private></Reference>
+    <!-- NLog ships in the build's root folder, next to lib/. Only the test-only capture script uses it. -->
+    <Reference Include="NLog" Condition="Exists('$(CoreLibs)/../NLog.dll')"><HintPath>$(CoreLibs)/../NLog.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="NLog" Condition="!Exists('$(CoreLibs)/../NLog.dll')"><HintPath>$(CoreLibs)/NLog.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
 
 </Project>

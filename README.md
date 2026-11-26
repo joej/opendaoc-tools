@@ -27,6 +27,10 @@ OpenDAoC server given its address and your credentials, because OpenDAoC account
   [docs/design/admin-host-move-money.md](docs/design/admin-host-move-money.md),
   [docs/design/admin-host-revive-items-level.md](docs/design/admin-host-revive-items-level.md) and
   [docs/design/admin-host-spawns.md](docs/design/admin-host-spawns.md).
+- [`server-scripts/admin-host-test/`](server-scripts/admin-host-test/) — `AdminHostPackets.cs`, for
+  test servers only: adds packet capture to the admin host (every packet one account sends and
+  receives, chat included, for a set time). Design and test results:
+  [docs/design/admin-host-packets.md](docs/design/admin-host-packets.md).
 - [`server-scripts/ScriptCheck.csproj`](server-scripts/ScriptCheck.csproj) — compile check for the
   drop-in scripts against an OpenDAoC-Core build.
 - [`navmesh/`](navmesh/) — building OpenDAoC navmeshes on Linux and macOS without BuildNav's

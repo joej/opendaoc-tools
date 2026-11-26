@@ -12,6 +12,10 @@
 // Revive, items and level: docs/design/admin-host-revive-items-level.md. Admin spawns (NPCs, boats,
 // rams; never saved): docs/design/admin-host-spawns.md.
 //
+// Test-only ops live in their own files (server-scripts/admin-host-test/), installed only on test
+// servers. Each is a part of this partial class and adds its ops through AddOps; without one, the
+// partial methods below compile to nothing.
+//
 // Every operation runs on the game loop: the host posts one action per tick to ClientService, whose
 // posted actions finish before any client's packets for that tick are handled. Every change is
 // audited, one JSON line per request in logs/admin-host.jsonl.
@@ -46,7 +50,7 @@ using DOL.GS.ServerProperties;
 
 namespace OpenDaocTools.Scripts
 {
-    public static class AdminHost
+    public static partial class AdminHost
     {
         private static readonly DOL.Logging.Logger log = DOL.Logging.LoggerManager.Create(typeof(AdminHost));
 
@@ -86,6 +90,10 @@ namespace OpenDaocTools.Scripts
                 _auditPath = Path.Combine(root, "logs", "admin-host.jsonl");
                 _pendingPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(_socketPath)), "admin-pending.json");
                 LoadPending();
+                int core = Ops.Count;
+                AddOps(Ops);
+                if (Ops.Count > core)
+                    log.Warn("AdminHost test-only ops loaded: " + string.Join(", ", Ops.Keys.Skip(core)));
                 GameEventMgr.AddHandler(GamePlayerEvent.GameEntered, _onGameEntered);
 
                 if (File.Exists(_socketPath))
@@ -112,6 +120,7 @@ namespace OpenDaocTools.Scripts
         public static void OnServerStopped(DOLEvent e, object sender, EventArgs args)
         {
             _stopping = true;
+            try { StopExtras(); } catch { }
             try { GameEventMgr.RemoveHandler(GamePlayerEvent.GameEntered, _onGameEntered); } catch { }
             try { _listener?.Close(); } catch { }
             try { if (_socketPath != null && File.Exists(_socketPath)) File.Delete(_socketPath); } catch { }
@@ -352,6 +361,10 @@ namespace OpenDaocTools.Scripts
             ["spawn.path"] = new OpSpec { Run = SpawnPath },
             ["spawn.stop"] = new OpSpec { Run = SpawnStop },
         };
+
+        // Implemented by the test-only files, if installed.
+        static partial void AddOps(Dictionary<string, OpSpec> ops);
+        static partial void StopExtras();
 
         private static object ServerStatus(Request req)
         {

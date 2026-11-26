@@ -86,6 +86,8 @@ Not tested:
 
 ## Packet capture: what Core offers
 
+Since built as a test-only script: [packet capture](admin-host-packets.md).
+
 Client tests also want to see what the client sends back, not only what the server sent. Core
 `0ac41d443` already has `PacketTrace`: one tab-separated line per packet in both directions (TCP and
 UDP), with the body in hex, the account name in the third column, and the login password and
