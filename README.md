@@ -20,11 +20,13 @@ OpenDAoC server given its address and your credentials, because OpenDAoC account
   audited), with [`tools/adminctl.py`](tools/adminctl.py) as a command-line client. It does
   status, online players and their state (position, health, money, inventory, effects), setting a
   spec, level, money, backpack items and position, live or queued until an offline character's next
-  login; reviving and healing; and cache reloads. Design and test results:
+  login; reviving and healing; spawning NPCs, boats and siege rams for client tests (boarding,
+  sailing a path; never saved); and cache reloads. Design and test results:
   [docs/design/admin-host.md](docs/design/admin-host.md),
   [docs/design/admin-host-queued-edits.md](docs/design/admin-host-queued-edits.md),
-  [docs/design/admin-host-move-money.md](docs/design/admin-host-move-money.md) and
-  [docs/design/admin-host-revive-items-level.md](docs/design/admin-host-revive-items-level.md).
+  [docs/design/admin-host-move-money.md](docs/design/admin-host-move-money.md),
+  [docs/design/admin-host-revive-items-level.md](docs/design/admin-host-revive-items-level.md) and
+  [docs/design/admin-host-spawns.md](docs/design/admin-host-spawns.md).
 - [`server-scripts/ScriptCheck.csproj`](server-scripts/ScriptCheck.csproj) — compile check for the
   drop-in scripts against an OpenDAoC-Core build.
 - [`navmesh/`](navmesh/) — building OpenDAoC navmeshes on Linux and macOS without BuildNav's

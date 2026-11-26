@@ -101,6 +101,9 @@ fields copy their property when their class loads, so `Properties.Refresh()` nev
   ([revive, items and level](admin-host-revive-items-level.md)). Realm points: still to do, with its own
   "what the client must be told" check, as specs had.
 - Kick, mute, broadcast, the appeal queue.
+- Objects for client tests: NPCs, boats and rams since 2026-11-25 ([spawns](admin-host-spawns.md)).
+  Other siege weapons, a casting mob and pets: still to do. Packet capture and raw packets: a separate
+  test-only script (see the spawns doc for what Core offers).
 - The HTTP front for web tools, and any non-loopback access.
 - Staging-diff apply (gap 3).
 

@@ -13,6 +13,11 @@ Run it as the server's user, on the server's machine; the socket is mode 0600.
     adminctl.py player.item.set name=LabChar id=adder_venom count=20                       # backpack count; queue=true too
     adminctl.py player.level.set name=LabChar level=20                                     # lowering respecs; queue=true too
     adminctl.py player.revive name=LabChar clearPenalty=true                               # online only
+    adminctl.py spawn.boat near=LabChar                                                    # also spawn.npc, spawn.ram size=light
+    adminctl.py spawn.board id=s-1a2b3c4d name=LabChar
+    adminctl.py spawn.path id=s-1a2b3c4d points="560600,511000,2500;560600,511600,2500" speed=300
+    adminctl.py spawn.list
+    adminctl.py spawn.delete all=true
     adminctl.py player.pending
     adminctl.py player.pending.cancel id=p-1a2b3c4d
     adminctl.py cache.reload what=item id=0_Demon_Bound_Bracelet

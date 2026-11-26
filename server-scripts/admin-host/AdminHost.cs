@@ -9,7 +9,8 @@
 // An edit to a character that isn't in the world can be queued (queue=true) and is applied when the
 // character next enters the world: docs/design/admin-host-queued-edits.md. Pending edits are kept in
 // admin-pending.json next to the socket. Moving a player and setting money: docs/design/admin-host-move-money.md.
-// Revive, items and level: docs/design/admin-host-revive-items-level.md.
+// Revive, items and level: docs/design/admin-host-revive-items-level.md. Admin spawns (NPCs, boats,
+// rams; never saved): docs/design/admin-host-spawns.md.
 //
 // Every operation runs on the game loop: the host posts one action per tick to ClientService, whose
 // posted actions finish before any client's packets for that tick are handled. Every change is
@@ -35,6 +36,8 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using DOL.AI;
+using DOL.AI.Brain;
 using DOL.Database;
 using DOL.Events;
 using DOL.GS;
@@ -339,6 +342,15 @@ namespace OpenDaocTools.Scripts
             ["player.pending"] = new OpSpec { Run = PlayerPending },
             ["player.pending.cancel"] = new OpSpec { Run = PlayerPendingCancel },
             ["cache.reload"] = new OpSpec { Run = CacheReload },
+            ["spawn.npc"] = new OpSpec { Run = SpawnNpc },
+            ["spawn.boat"] = new OpSpec { Run = SpawnBoat },
+            ["spawn.ram"] = new OpSpec { Run = SpawnRam },
+            ["spawn.list"] = new OpSpec { Run = SpawnList },
+            ["spawn.delete"] = new OpSpec { Run = SpawnDelete },
+            ["spawn.board"] = new OpSpec { Run = SpawnBoard },
+            ["spawn.unboard"] = new OpSpec { Run = SpawnUnboard },
+            ["spawn.path"] = new OpSpec { Run = SpawnPath },
+            ["spawn.stop"] = new OpSpec { Run = SpawnStop },
         };
 
         private static object ServerStatus(Request req)
@@ -1162,12 +1174,398 @@ namespace OpenDaocTools.Scripts
             return result;
         }
 
+        // ---- admin spawns ------------------------------------------------------------------------
+        // Objects the host puts in the world for a test: a standing NPC, a boat, a siege ram. They are
+        // Core's own classes with saving switched off, so they send the client the same packets as the
+        // real thing but never reach the database; a restart clears them. The registry lives on the
+        // game loop (only Drain touches it); each path runs on its own ECS timer.
+
+        public sealed class AdminSpawnNpc : GameNPC
+        {
+            public AdminSpawnNpc(ABrain brain) : base(brain) { }
+            public override void SaveIntoDatabase() { }
+            public override void DeleteFromDatabase() { }
+        }
+
+        public sealed class AdminSpawnBoat : GameBoat
+        {
+            public AdminSpawnBoat(byte type) : base(type) { }
+            public override void SaveIntoDatabase() { }
+            public override void DeleteFromDatabase() { }
+        }
+
+        public sealed class AdminSpawnRam : GameSiegeRam
+        {
+            public override void SaveIntoDatabase() { }
+            public override void DeleteFromDatabase() { }
+        }
+
+        private sealed class Spawn
+        {
+            public string Id, Kind, Actor;
+            public DateTime Created;
+            public GameNPC Npc;
+            // Path state, written by the path timer and read by Drain; the game loop runs them one after the other.
+            public List<Point3D> Path;
+            public int Next;
+            public bool Loop, Finished;
+            public short Speed;
+            public long Issued;
+            public ECSGameTimer Timer;
+        }
+
+        private static readonly Dictionary<string, Spawn> _spawns = new();
+        private const int MaxSpawns = 50;
+        private const int MaxPathPoints = 64;
+
+        // Boat models and the GameBoat type that sets their seats, as GameBoat.LoadFromDatabase maps them.
+        private static readonly Dictionary<int, byte> BoatTypes = new()
+        {
+            [1616] = 0, [2648] = 1, [2646] = 2, [2647] = 3, [1615] = 4, [1595] = 5, [1612] = 6, [1613] = 7, [1614] = 8,
+        };
+
+        // As SummonSiegeRam sets them, by its spell's damage value.
+        private static readonly Dictionary<string, (byte level, string name, ushort model)> RamSizes = new()
+        {
+            ["mini"] = (0, "mini siege ram", 2605),
+            ["light"] = (1, "light siege ram", 2600),
+            ["medium"] = (2, "medium siege ram", 2601),
+            ["heavy"] = (3, "heavy siege ram", 2602),
+        };
+
+        private static object SpawnNpc(Request req)
+        {
+            string brain = OptStringArg(req, "brain") ?? "none";
+            if (brain != "none" && brain != "standard")
+                throw new OpError("bad_request", "args.brain must be none (stands still) or standard (Core's mob brain)");
+            var npc = new AdminSpawnNpc(brain == "standard" ? new StandardMobBrain() : new BlankBrain())
+            {
+                Name = OptStringArg(req, "label") ?? "admin spawn",
+                Model = (ushort) RangeArg(req, "model", 408, 1, ushort.MaxValue),
+                Level = (byte) RangeArg(req, "level", 1, 0, 255),
+                Size = (byte) RangeArg(req, "size", 50, 1, 255),
+            };
+            npc.MaxSpeedBase = (short) RangeArg(req, "speed", 200, 1, 2000);
+            if (BoolArg(req, "peace", false)) npc.Flags |= GameNPC.eFlags.PEACE;
+            return AddSpawn(req, "npc", npc, 150, 0);
+        }
+
+        private static object SpawnBoat(Request req)
+        {
+            int model = RangeArg(req, "model", 2648, 1, ushort.MaxValue);
+            var boat = new AdminSpawnBoat(BoatTypes.TryGetValue(model, out byte type) ? type : (byte) 0)
+            {
+                Name = OptStringArg(req, "label") ?? "admin boat",
+                Model = (ushort) model,
+                MaxSpeedBase = (short) RangeArg(req, "speed", 500, 1, 2000),
+                OwnerID = string.Empty, // GameBoat refuses a double-click unless OwnerID is empty
+            };
+            return AddSpawn(req, "boat", boat, 300, null);
+        }
+
+        private static object SpawnRam(Request req)
+        {
+            string size = OptStringArg(req, "size") ?? "light";
+            if (!RamSizes.TryGetValue(size, out var r))
+                throw new OpError("bad_request", "args.size must be one of " + string.Join(", ", RamSizes.Keys));
+            var ram = new AdminSpawnRam { Level = r.level, Name = OptStringArg(req, "label") ?? r.name, Model = r.model };
+            return AddSpawn(req, "ram", ram, 150, null);
+        }
+
+        // Position: near=<player> (distance in front of them, facing them), or region, x, y, z and heading.
+        // Realm: args.realm (0-3), else defaultRealm, else the near player's realm.
+        private static object AddSpawn(Request req, string kind, GameNPC npc, int defaultDistance, int? defaultRealm)
+        {
+            PruneSpawns();
+            if (_spawns.Count >= MaxSpawns)
+                throw new OpError("invalid", "at most " + MaxSpawns + " admin spawns at once; spawn.delete some first");
+
+            ushort region, heading;
+            int x, y, z;
+            GamePlayer near = null;
+            if (req.Args.ContainsKey("near"))
+            {
+                string name = StringArg(req, "near");
+                near = InWorld(name) ?? throw new OpError("not_online", name + " is not online");
+                int distance = RangeArg(req, "distance", defaultDistance, 0, 5000);
+                Point2D at = near.GetPointFromHeading(near.Heading, distance);
+                (region, x, y, z) = (near.CurrentRegionID, at.X, at.Y, near.Z);
+                heading = (ushort) ((near.Heading + 2048) & 0xFFF);
+            }
+            else
+            {
+                int rgn = IntArg(req, "region");
+                (x, y, z) = (IntArg(req, "x"), IntArg(req, "y"), IntArg(req, "z"));
+                int? h = OptIntArg(req, "heading");
+                CheckPosition(rgn, x, y, h);
+                (region, heading) = ((ushort) rgn, (ushort) (h ?? 0));
+            }
+
+            int realm = RangeArg(req, "realm", defaultRealm ?? (int) (near?.Realm ?? 0), 0, 3);
+            npc.Realm = (eRealm) realm;
+            npc.CurrentRegionID = region;
+            (npc.X, npc.Y, npc.Z, npc.Heading) = (x, y, z, heading);
+            if (!npc.AddToWorld())
+                throw new OpError("failed", "Core didn't add the " + kind + " to the world");
+
+            var s = new Spawn { Id = NewSpawnId(), Kind = kind, Actor = req.Actor, Created = DateTime.UtcNow, Npc = npc };
+            _spawns[s.Id] = s;
+            var result = SpawnInfo(s);
+            Audit(req, null, result, result);
+            return result;
+        }
+
+        private static object SpawnList(Request req)
+        {
+            PruneSpawns();
+            return new Dictionary<string, object> { ["spawns"] = _spawns.Values.OrderBy(s => s.Created).Select(SpawnInfo).ToList() };
+        }
+
+        // id=<spawn id>, or all=true. Riders are put down and a siege weapon's controller let go first.
+        private static object SpawnDelete(Request req)
+        {
+            PruneSpawns();
+            List<Spawn> gone = BoolArg(req, "all", false)
+                ? _spawns.Values.ToList()
+                : new List<Spawn> { SpawnById(req) };
+            var deleted = new List<object>();
+            foreach (Spawn s in gone)
+            {
+                var info = SpawnInfo(s);
+                StopPath(s, false);
+                if (s.Npc is GameSiegeWeapon sw) sw.ReleaseControl();
+                s.Npc.Delete();
+                _spawns.Remove(s.Id);
+                deleted.Add(info);
+            }
+            var result = new Dictionary<string, object> { ["deleted"] = deleted };
+            if (deleted.Count > 0) Audit(req, deleted, null, result);
+            return result;
+        }
+
+        // Puts a player in a seat of a boat or ram, as a double-click does (GameNPC.Interact). For a ram,
+        // control=true (the default) also gives them the siege controls, as summoning one does.
+        private static object SpawnBoard(Request req)
+        {
+            Spawn s = SpawnById(req);
+            GameNPC n = s.Npc;
+            GamePlayer p = OnlinePlayer(req);
+            if (s.Kind == "npc")
+                throw new OpError("invalid", s.Id + " is an NPC; only boats and rams have seats");
+            if (p.CurrentRegionID != n.CurrentRegionID)
+                throw new OpError("invalid", p.Name + " is in region " + p.CurrentRegionID + ", the " + s.Kind + " in " + n.CurrentRegionID);
+
+            bool changed = false;
+            if (n.RiderSlot(p) == -1)
+            {
+                if (n.GetFreeArrayLocation() == -1)
+                    throw new OpError("invalid", "every seat of " + s.Id + " is taken (" + n.MAX_PASSENGERS + ")");
+                if (p.IsRiding) p.DismountSteed(true);
+                if (p.IsOnHorse) p.IsOnHorse = false;
+                if (!p.MountSteed(n, true) || p.Steed != n)
+                    throw new OpError("failed", "Core didn't seat " + p.Name);
+                changed = true;
+            }
+
+            if (n is GameSiegeWeapon sw && BoolArg(req, "control", true) && sw.Owner != p)
+            {
+                sw.TakeControl(p); // tells the player itself when it can't
+                changed |= sw.Owner == p;
+            }
+
+            var result = new Dictionary<string, object>
+            {
+                ["name"] = p.Name, ["seat"] = n.RiderSlot(p), ["changed"] = changed, ["spawn"] = SpawnInfo(s),
+            };
+            if (changed) Audit(req, null, s.Id, result);
+            return result;
+        }
+
+        private static object SpawnUnboard(Request req)
+        {
+            GamePlayer p = OnlinePlayer(req);
+            GameNPC steed = p.Steed;
+            bool controlled = p.SiegeWeapon != null;
+            if (controlled) p.SiegeWeapon.ReleaseControl();
+            bool dismounted = steed != null && p.DismountSteed(true);
+            var result = new Dictionary<string, object>
+            {
+                ["name"] = p.Name, ["changed"] = dismounted || controlled,
+                ["from"] = steed == null ? null : steed.Name + " (object " + steed.ObjectID + ")",
+            };
+            if (dismounted || controlled) Audit(req, steed?.Name, null, result);
+            return result;
+        }
+
+        // Moves a spawn through points in a straight line from one to the next (WalkTo: no navmesh, so a boat
+        // can cross water). points: "x,y,z;x,y,z" or a JSON array of [x,y,z]. Optional speed and loop.
+        private static object SpawnPath(Request req)
+        {
+            Spawn s = SpawnById(req);
+            GameNPC n = s.Npc;
+            if (!req.Args.TryGetValue("points", out object raw) || raw == null)
+                throw new OpError("bad_request", "args.points is required: \"x,y,z;x,y,z\" or [[x,y,z],...]");
+            List<Point3D> points = ParsePoints(raw);
+            if (points.Count == 0 || points.Count > MaxPathPoints)
+                throw new OpError("invalid", "give 1 to " + MaxPathPoints + " points");
+            foreach (Point3D pt in points)
+                CheckPosition(n.CurrentRegionID, pt.X, pt.Y, null);
+            short speed = (short) RangeArg(req, "speed", n.MaxSpeedBase, 1, 2000);
+            bool loop = BoolArg(req, "loop", false);
+
+            StopPath(s, true);
+            (s.Path, s.Next, s.Loop, s.Finished, s.Speed) = (points, 0, loop, false, speed);
+            n.WalkTo(points[0], speed);
+            s.Issued = GameLoop.GameLoopTime;
+            s.Timer = new ECSGameTimer(n, _ => PathTick(s), 200);
+
+            var result = SpawnInfo(s);
+            Audit(req, null, result, result);
+            return result;
+        }
+
+        private static object SpawnStop(Request req)
+        {
+            Spawn s = SpawnById(req);
+            bool wasMoving = s.Path != null || s.Npc.IsMoving;
+            StopPath(s, true);
+            var result = SpawnInfo(s);
+            if (wasMoving) Audit(req, null, result, result);
+            return result;
+        }
+
+        private static int PathTick(Spawn s)
+        {
+            GameNPC n = s.Npc;
+            if (s.Path == null || n.ObjectState != GameObject.eObjectState.Active)
+            {
+                s.Timer = null;
+                return 0;
+            }
+
+            Point3D target = s.Path[s.Next];
+            if (n.IsWithinRadius(target, 16))
+            {
+                if (++s.Next >= s.Path.Count)
+                {
+                    if (!s.Loop)
+                    {
+                        n.StopMoving();
+                        (s.Path, s.Finished, s.Timer) = (null, true, null);
+                        return 0;
+                    }
+                    s.Next = 0;
+                }
+                n.WalkTo(s.Path[s.Next], s.Speed);
+                s.Issued = GameLoop.GameLoopTime;
+            }
+            else if (!n.IsMoving && GameLoop.GameLoopTime - s.Issued > 1000)
+            {
+                n.WalkTo(target, s.Speed); // stopped short (something else stopped it): go on
+                s.Issued = GameLoop.GameLoopTime;
+            }
+            return 200;
+        }
+
+        private static void StopPath(Spawn s, bool stopMoving)
+        {
+            s.Timer?.Stop();
+            (s.Timer, s.Path) = (null, null);
+            if (stopMoving && s.Npc.ObjectState == GameObject.eObjectState.Active) s.Npc.StopMoving();
+        }
+
+        private static List<Point3D> ParsePoints(object raw)
+        {
+            var points = new List<Point3D>();
+            IEnumerable<object> items = raw switch
+            {
+                string text => text.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+                List<object> list => list,
+                _ => throw new OpError("bad_request", "args.points must be a string or an array"),
+            };
+            foreach (object item in items)
+            {
+                List<double> c = item switch
+                {
+                    string t => t.Split(',').Select(v => double.TryParse(v.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture,
+                        out double d) ? d : double.NaN).ToList(),
+                    List<object> l => l.Select(v => v is double d ? d : double.NaN).ToList(),
+                    _ => null,
+                };
+                if (c == null || c.Count != 3 || c.Any(v => double.IsNaN(v) || v != Math.Floor(v) || v < int.MinValue || v > int.MaxValue))
+                    throw new OpError("bad_request", "each point is three whole numbers x,y,z");
+                points.Add(new Point3D((int) c[0], (int) c[1], (int) c[2]));
+            }
+            return points;
+        }
+
+        private static Dictionary<string, object> SpawnInfo(Spawn s)
+        {
+            GameNPC n = s.Npc;
+            var info = new Dictionary<string, object>
+            {
+                ["id"] = s.Id, ["kind"] = s.Kind, ["name"] = n.Name, ["objectId"] = (int) n.ObjectID, ["model"] = (int) n.Model,
+                ["level"] = (int) n.Level, ["realm"] = RealmName(n.Realm),
+                ["inWorld"] = n.ObjectState == GameObject.eObjectState.Active,
+                ["position"] = Pos(n.CurrentRegionID, n.X, n.Y, n.Z, n.Heading),
+                ["moving"] = n.IsMoving,
+                ["createdBy"] = s.Actor, ["created"] = s.Created.ToString("o"),
+            };
+            if (s.Kind != "npc")
+            {
+                info["seats"] = n.MAX_PASSENGERS;
+                info["riders"] = n.CurrentRiders.Select(r => (object) r.Name).ToList();
+            }
+            if (n is GameSiegeWeapon sw) info["controlledBy"] = sw.Owner?.Name;
+            if (s.Path != null || s.Finished)
+                info["path"] = new Dictionary<string, object>
+                {
+                    ["points"] = s.Path?.Count, ["next"] = s.Path == null ? null : (object) s.Next, ["loop"] = s.Loop,
+                    ["speed"] = (int) s.Speed, ["finished"] = s.Finished,
+                };
+            return info;
+        }
+
+        // Drops spawns that Core removed itself: a ram decays and dies, an empty boat goes after 15 minutes.
+        private static void PruneSpawns()
+        {
+            foreach (string id in _spawns.Where(kv => kv.Value.Npc.ObjectState == GameObject.eObjectState.Deleted)
+                         .Select(kv => kv.Key).ToList())
+                _spawns.Remove(id);
+        }
+
+        private static Spawn SpawnById(Request req)
+        {
+            string id = StringArg(req, "id");
+            PruneSpawns();
+            return _spawns.TryGetValue(id, out Spawn s) ? s : throw new OpError("not_found", "no admin spawn " + id + " (spawn.list)");
+        }
+
+        private static string NewSpawnId()
+        {
+            string id;
+            do id = "s-" + Guid.NewGuid().ToString("N").Substring(0, 8);
+            while (_spawns.ContainsKey(id));
+            return id;
+        }
+
+        private static string OptStringArg(Request req, string key) =>
+            req.Args.TryGetValue(key, out object v) && v != null ? StringArg(req, key) : null;
+
+        private static int RangeArg(Request req, string key, int fallback, int min, int max)
+        {
+            int v = OptIntArg(req, key) ?? fallback;
+            if (v < min || v > max)
+                throw new OpError("invalid", "args." + key + " must be " + min + " to " + max);
+            return v;
+        }
+
         // ---- helpers -----------------------------------------------------------------------------
 
         // eRealm has alias names (_FirstPlayerRealm = Albion), so ToString() can't be used.
         private static string RealmName(eRealm realm) => (int) realm switch
         {
-            1 => "Albion", 2 => "Midgard", 3 => "Hibernia", _ => realm.ToString(),
+            0 => "None", 1 => "Albion", 2 => "Midgard", 3 => "Hibernia", _ => realm.ToString(),
         };
 
         private static GamePlayer OnlinePlayer(Request req)
