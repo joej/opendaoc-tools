@@ -10,7 +10,8 @@
 // character next enters the world: docs/design/admin-host-queued-edits.md. Pending edits are kept in
 // admin-pending.json next to the socket. Moving a player and setting money: docs/design/admin-host-move-money.md.
 // Revive, items and level: docs/design/admin-host-revive-items-level.md. Admin spawns (NPCs, boats,
-// rams; never saved): docs/design/admin-host-spawns.md.
+// rams; never saved): docs/design/admin-host-spawns.md. Kick, mute, announcements and the appeal
+// queue: docs/design/admin-host-moderation.md.
 //
 // Test-only ops live in their own files (server-scripts/admin-host-test/), installed only on test
 // servers. Each is a part of this partial class and adds its ops through AddOps; without one, the
@@ -47,6 +48,7 @@ using DOL.Events;
 using DOL.GS;
 using DOL.GS.PacketHandler;
 using DOL.GS.ServerProperties;
+using DOL.Language;
 
 namespace OpenDaocTools.Scripts
 {
@@ -351,6 +353,11 @@ namespace OpenDaocTools.Scripts
             ["player.pending"] = new OpSpec { Run = PlayerPending },
             ["player.pending.cancel"] = new OpSpec { Run = PlayerPendingCancel },
             ["cache.reload"] = new OpSpec { Run = CacheReload },
+            ["player.kick"] = new OpSpec { Run = PlayerKick },
+            ["player.mute"] = new OpSpec { Run = PlayerMute },
+            ["server.announce"] = new OpSpec { Run = ServerAnnounce },
+            ["appeal.list"] = new OpSpec { Run = AppealList },
+            ["appeal.close"] = new OpSpec { Run = AppealClose },
             ["spawn.npc"] = new OpSpec { Run = SpawnNpc },
             ["spawn.boat"] = new OpSpec { Run = SpawnBoat },
             ["spawn.ram"] = new OpSpec { Run = SpawnRam },
@@ -1186,6 +1193,269 @@ namespace OpenDaocTools.Scripts
             Audit(req, null, null, result);
             return result;
         }
+
+        // ---- moderation: kick, mute, announce, appeals -------------------------------------------
+        // Each does what Core's GM command does (/kick, /mute, /announce, /gmappeal close), with the
+        // actor in place of the GM's name. Design: docs/design/admin-host-moderation.md.
+
+        private static string Staff(Request req) => string.IsNullOrEmpty(req.Actor) ? "admin" : req.Actor;
+
+        // A logged-in client: by character (in the world) or by account (also at the character screen).
+        private static GameClient LoggedInClient(Request req, string what)
+        {
+            string name = OptStringArg(req, "name"), account = OptStringArg(req, "account");
+            if ((name == null) == (account == null))
+                throw new OpError("bad_request", "give args.name (a character in the world) or args.account (" + what + ")");
+            if (name != null)
+                return OnlinePlayer(req).Client;
+            GameClient c = null;
+            try { c = ClientService.Instance.GetClientFromAccountName(account); }
+            catch (NullReferenceException) { } // a connection that hasn't logged in has no account yet
+            return c ?? throw new OpError("not_online", "account " + account + " is not logged in");
+        }
+
+        private static Dictionary<string, object> ClientInfo(GameClient c) => new()
+        {
+            ["account"] = c.Account?.Name,
+            ["name"] = c.Player?.Name,
+            ["sessionId"] = (int) c.SessionID,
+            ["state"] = c.ClientState.ToString(),
+        };
+
+        private static object PlayerKick(Request req)
+        {
+            GameClient c = LoggedInClient(req, "a logged-in account");
+            string message = OptStringArg(req, "message");
+            bool force = BoolArg(req, "force", false);
+            Dictionary<string, object> info = ClientInfo(c);
+            GamePlayer p = c.Player;
+            bool inWorld = p != null && (c.ClientState is GameClient.eClientState.Playing or GameClient.eClientState.Linkdead);
+
+            // As /kick: the message in the system and chat windows, the quit packet, then the disconnect.
+            // A link-dead client's socket is already closed, so it gets no packets.
+            if (c.ClientState is not GameClient.eClientState.Linkdead)
+            {
+                if (p != null)
+                {
+                    string text = message ?? LanguageMgr.GetTranslation(c, "GMCommands.Kick.RemovedFromServer");
+                    c.Out.SendMessage(text, eChatType.CT_Help, eChatLoc.CL_SystemWindow);
+                    c.Out.SendMessage(text, eChatType.CT_Help, eChatLoc.CL_ChatWindow);
+                }
+                c.Out.SendPlayerQuit(true);
+            }
+
+            bool removed;
+            if (force && inWorld)
+            {
+                // What Core's link-death timer does when its 60 s run out, now: release a dead player,
+                // save, then close the socket and remove the character (GameClient.LinkDeathQuit). This
+                // also ends a link death that never runs out, as when a frozen client keeps sending.
+                if (p.ObjectState == GameObject.eObjectState.Active)
+                {
+                    if (!p.IsAlive) p.Release(p.ReleaseType, true);
+                    CraftingProgressMgr.FlushAndSaveInstance(p);
+                    p.SaveIntoDatabase();
+                }
+                c.LinkDeathQuit();
+                removed = true;
+            }
+            else
+            {
+                // A player in the world goes link-dead and quits 60 s later; at the character screen or
+                // while entering the world, Core removes the connection at once.
+                if (c.ClientState is not GameClient.eClientState.Linkdead) c.Disconnect();
+                removed = !inWorld;
+            }
+
+            var after = new Dictionary<string, object>(info)
+            {
+                ["kicked"] = true, ["forced"] = force, ["removed"] = removed,
+                ["linkDead"] = inWorld && !removed,
+            };
+            Audit(req, new Dictionary<string, object>(info), null, after);
+            return after;
+        }
+
+        // muted=true|false. Without account=true or args.account it mutes the character until it logs
+        // out; with them it mutes the account (every character, saved), which needs no one logged in.
+        private static object PlayerMute(Request req)
+        {
+            if (!req.Args.ContainsKey("muted"))
+                throw new OpError("bad_request", "args.muted (true or false) is required");
+            bool muted = BoolArg(req, "muted", true);
+            string name = OptStringArg(req, "name"), accountName = OptStringArg(req, "account");
+            if ((name == null) == (accountName == null))
+                throw new OpError("bad_request", "give args.name (a character in the world) or args.account (an account name)");
+            bool accountWide = accountName != null || BoolArg(req, "accountWide", false);
+
+            GamePlayer p = name != null ? OnlinePlayer(req) : null;
+            GameClient client = p?.Client;
+            DbAccount account;
+            if (p != null)
+                account = client.Account;
+            else
+            {
+                try { client = ClientService.Instance.GetClientFromAccountName(accountName); }
+                catch (NullReferenceException) { }
+                // A logged-in account's object is the one Core saves: change that one, never a second copy.
+                account = client?.Account ?? GameServer.Database.FindObjectByKey<DbAccount>(accountName)
+                    ?? throw new OpError("not_found", "no account " + accountName);
+                p = client?.Player;
+            }
+
+            var before = MuteInfo(account, p);
+            bool changed;
+            if (accountWide)
+            {
+                changed = account.IsMuted != muted || (p != null && p.IsMuted != muted);
+                account.IsMuted = muted;
+                if (p != null) p.IsMuted = muted;
+                GameServer.Database.SaveObject(account);
+            }
+            else
+            {
+                if (!muted && account.IsMuted)
+                    throw new OpError("invalid", "the account is muted; unmute it with accountWide=true (or args.account)");
+                changed = p.IsMuted != muted;
+                p.IsMuted = muted;
+            }
+
+            // As /mute: tell the player, in the staff channel.
+            if (changed && p != null && p.ObjectState == GameObject.eObjectState.Active)
+            {
+                p.Out.SendMessage("You have been " + (muted ? "muted" : "unmuted") + " from public channels by staff member " + Staff(req) + "!",
+                    eChatType.CT_Staff, eChatLoc.CL_SystemWindow);
+                if (muted && accountWide)
+                    p.Out.SendMessage("This mute has been placed on all characters for this account.", eChatType.CT_Staff, eChatLoc.CL_SystemWindow);
+            }
+
+            var after = MuteInfo(account, p);
+            after["changed"] = changed;
+            Audit(req, before, after, after);
+            return after;
+        }
+
+        private static Dictionary<string, object> MuteInfo(DbAccount account, GamePlayer p) => new()
+        {
+            ["account"] = account.Name,
+            ["accountMuted"] = account.IsMuted,
+            ["name"] = p?.Name,
+            ["characterMuted"] = p?.IsMuted,
+        };
+
+        // style: log (system window, the default), send (chat window), center (middle of the screen),
+        // window (a text window) or confirm (a dialog box). Optional realm (1 to 3) and region filters.
+        private static readonly string[] AnnounceStyles = { "log", "send", "center", "window", "confirm" };
+
+        private static object ServerAnnounce(Request req)
+        {
+            string message = StringArg(req, "message").Trim();
+            if (message.Length == 0)
+                throw new OpError("invalid", "args.message is empty");
+            if (message.Length > 1000)
+                throw new OpError("invalid", "args.message is longer than 1000 characters");
+            string style = OptStringArg(req, "style") ?? "log";
+            if (!AnnounceStyles.Contains(style))
+                throw new OpError("invalid", "args.style must be one of " + string.Join(", ", AnnounceStyles));
+            int? realm = OptIntArg(req, "realm");
+            if (realm is < 1 or > 3)
+                throw new OpError("invalid", "args.realm must be 1 (Albion), 2 (Midgard) or 3 (Hibernia)");
+            int? region = OptIntArg(req, "region");
+
+            int sent = 0;
+            foreach (GamePlayer player in ClientService.Instance.GetPlayers())
+            {
+                if (realm != null && (int) player.Realm != realm) continue;
+                if (region != null && player.CurrentRegionID != region) continue;
+                GameClient c = player.Client;
+                switch (style)
+                {
+                    case "log":
+                        player.Out.SendMessage(LanguageMgr.GetTranslation(c, "GMCommands.Announce.LogAnnounce", message),
+                            eChatType.CT_Important, eChatLoc.CL_SystemWindow);
+                        break;
+                    case "send":
+                        player.Out.SendMessage(LanguageMgr.GetTranslation(c, "GMCommands.Announce.SendAnnounce", message),
+                            eChatType.CT_Send, eChatLoc.CL_ChatWindow);
+                        break;
+                    case "center":
+                        player.Out.SendMessage(message, eChatType.CT_ScreenCenter, eChatLoc.CL_SystemWindow);
+                        break;
+                    case "window":
+                        player.Out.SendCustomTextWindow(LanguageMgr.GetTranslation(c, "GMCommands.Announce.WindowAnnounce", Staff(req)),
+                            new List<string> { message });
+                        break;
+                    case "confirm":
+                        player.Out.SendDialogBox(eDialogCode.SimpleWarning, 0, 0, 0, 0, eDialogType.Ok, true,
+                            LanguageMgr.GetTranslation(c, "GMCommands.Announce.ConfirmAnnounce", Staff(req), message));
+                        break;
+                }
+                sent++;
+            }
+
+            var result = new Dictionary<string, object> { ["style"] = style, ["sent"] = sent };
+            Audit(req, null, null, result);
+            return result;
+        }
+
+        private static object AppealList(Request req)
+        {
+            bool all = BoolArg(req, "all", true);
+            var appeals = DOL.GS.Appeal.AppealMgr.GetAppeals(all);
+            return new Dictionary<string, object>
+            {
+                ["enabled"] = !Properties.DISABLE_APPEALSYSTEM,
+                ["count"] = DOL.GS.Appeal.AppealMgr.Count,
+                ["appeals"] = appeals.OrderByDescending(a => a.Severity).Select(AppealInfo).ToList(),
+            };
+        }
+
+        // By account, or by the name of the character that made it.
+        private static object AppealClose(Request req)
+        {
+            string name = OptStringArg(req, "name"), account = OptStringArg(req, "account");
+            if ((name == null) == (account == null))
+                throw new OpError("bad_request", "give args.account or args.name (the character that made the appeal)");
+            DbAppeal appeal = account != null
+                ? DOL.GS.Appeal.AppealMgr.GetAppealByAccountName(account)
+                : DOL.GS.Appeal.AppealMgr.GetAppealByPlayerName(name);
+            if (appeal == null)
+                throw new OpError("not_found", "no appeal from " + (account ?? name));
+
+            Dictionary<string, object> before = AppealInfo(appeal);
+            GamePlayer p = AppealPlayer(appeal);
+            // As /gmappeal close and closeoffline: the player (if in the world) and staff are told;
+            // Core deletes the row at its next periodic save.
+            if (p != null)
+                DOL.GS.Appeal.AppealMgr.CloseAppealOnline(Staff(req), p, appeal);
+            else
+                DOL.GS.Appeal.AppealMgr.CloseAppealOffline(Staff(req), appeal);
+
+            var result = new Dictionary<string, object> { ["closed"] = before, ["playerTold"] = p != null };
+            Audit(req, before, null, result);
+            return result;
+        }
+
+        private static GamePlayer AppealPlayer(DbAppeal appeal)
+        {
+            GameClient c = null;
+            try { c = ClientService.Instance.GetClientFromAccountName(appeal.Account); }
+            catch (NullReferenceException) { }
+            GamePlayer p = c?.Player;
+            return p != null && p.EnteredGame && p.ObjectState == GameObject.eObjectState.Active ? p : null;
+        }
+
+        private static Dictionary<string, object> AppealInfo(DbAppeal a) => new()
+        {
+            ["account"] = a.Account,
+            ["name"] = a.Name,
+            ["severity"] = a.Severity,
+            ["severityName"] = a.SeverityToName,
+            ["status"] = a.Status,
+            ["time"] = a.Timestamp,
+            ["text"] = a.Text,
+            ["online"] = AppealPlayer(a) != null,
+        };
 
         // ---- admin spawns ------------------------------------------------------------------------
         // Objects the host puts in the world for a test: a standing NPC, a boat, a siege ram. They are

@@ -21,12 +21,14 @@ OpenDAoC server given its address and your credentials, because OpenDAoC account
   status, online players and their state (position, health, money, inventory, effects), setting a
   spec, level, money, backpack items and position, live or queued until an offline character's next
   login; reviving and healing; spawning NPCs, boats and siege rams for client tests (boarding,
-  sailing a path; never saved); and cache reloads. Design and test results:
+  sailing a path; never saved); kicking, muting, server announcements and the appeal queue; and cache
+  reloads. Design and test results:
   [docs/design/admin-host.md](docs/design/admin-host.md),
   [docs/design/admin-host-queued-edits.md](docs/design/admin-host-queued-edits.md),
   [docs/design/admin-host-move-money.md](docs/design/admin-host-move-money.md),
-  [docs/design/admin-host-revive-items-level.md](docs/design/admin-host-revive-items-level.md) and
-  [docs/design/admin-host-spawns.md](docs/design/admin-host-spawns.md).
+  [docs/design/admin-host-revive-items-level.md](docs/design/admin-host-revive-items-level.md),
+  [docs/design/admin-host-spawns.md](docs/design/admin-host-spawns.md) and
+  [docs/design/admin-host-moderation.md](docs/design/admin-host-moderation.md).
 - [`server-scripts/admin-host-test/`](server-scripts/admin-host-test/) — `AdminHostPackets.cs`, for
   test servers only: adds packet capture to the admin host (every packet one account sends and
   receives, chat included, for a set time) and sends a crafted server packet to an online player. Design and test results:

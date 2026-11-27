@@ -18,6 +18,12 @@ Run it as the server's user, on the server's machine; the socket is mode 0600.
     adminctl.py spawn.path id=s-1a2b3c4d points="560600,511000,2500;560600,511600,2500" speed=300
     adminctl.py spawn.list
     adminctl.py spawn.delete all=true
+    adminctl.py player.kick name=LabChar message="Server restart in 5 minutes"
+    adminctl.py player.kick account=labprobe force=true                                    # no 60 s link death: saved and removed now
+    adminctl.py player.mute name=LabChar muted=true                                        # accountWide=true, or account=...
+    adminctl.py server.announce message="Restart at 20:00" style=center                   # log, send, center, window, confirm
+    adminctl.py appeal.list
+    adminctl.py appeal.close account=labprobe
     adminctl.py player.pending
     adminctl.py player.pending.cancel id=p-1a2b3c4d
     adminctl.py packet.capture.start account=labprobe seconds=60                         # test servers only

@@ -100,7 +100,8 @@ fields copy their property when their class loads, so `Properties.Refresh()` nev
   ([move and money](admin-host-move-money.md)), level and items since the same day
   ([revive, items and level](admin-host-revive-items-level.md)). Realm points: still to do, with its own
   "what the client must be told" check, as specs had.
-- Kick, mute, broadcast, the appeal queue.
+- Kick, mute, announcements and closing appeals since 2026-11-26 ([moderation](admin-host-moderation.md)).
+  Changing an appeal's status: still to do.
 - Objects for client tests: NPCs, boats and rams since 2026-11-25 ([spawns](admin-host-spawns.md)).
   Other siege weapons, a casting mob and pets: still to do. Packet capture: a separate test-only
   script, [admin-host-packets.md](admin-host-packets.md). Sending a crafted packet: the same script.
