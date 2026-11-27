@@ -20,6 +20,7 @@ Run it as the server's user, on the server's machine; the socket is mode 0600.
     adminctl.py spawn.delete all=true
     adminctl.py player.kick name=LabChar message="Server restart in 5 minutes"
     adminctl.py player.kick account=labprobe force=true                                    # no 60 s link death: saved and removed now
+    adminctl.py player.kick name=LabChar mark=true                                         # others see a ghost for the 60 s link death
     adminctl.py player.mute name=LabChar muted=true                                        # accountWide=true, or account=...
     adminctl.py server.announce message="Restart at 20:00" style=center                   # log, send, center, window, confirm
     adminctl.py appeal.list

@@ -8,7 +8,7 @@ They are production ops, in `AdminHost.cs`.
 
 | Op | Args | What it does |
 |---|---|---|
-| `player.kick` | `name` (a character in the world, also link-dead) or `account` (a logged-in account, also at the character screen), optional `message`, `force` | As `/kick`: the message (default Core's "You have been removed from the server!") in the system and chat windows, the quit packet, then the disconnect. `force=true`: the character is saved and removed at once, with no link death |
+| `player.kick` | `name` (a character in the world, also link-dead) or `account` (a logged-in account, also at the character screen), optional `message`, `force`, `mark` | As `/kick`: the message (default Core's "You have been removed from the server!") in the system and chat windows, the quit packet, then the disconnect half a second later. `force=true`: the character is saved and removed at once, with no link death. `mark=true`: players in view see the kicked character as a ghost for the link death |
 | `player.mute` | `name` or `account`, `muted` (true or false), optional `accountWide` | Mutes or unmutes. `name` alone: that character, until it logs out. `accountWide=true` or `account`: the account, saved, for every character |
 | `server.announce` | `message` (up to 1000 characters), optional `style` (`log`), `realm` (1 to 3), `region` | As `/announce`, to every player in the world, or those of one realm or region; returns how many got it |
 | `appeal.list` | optional `all` (true) | The appeal queue: account, character, severity, status, time, text, and whether the player is in the world. `all=false`: only players in the world, as `/gmappeal list` |
@@ -32,6 +32,27 @@ another 60 seconds.
 
 The result says what happened: `removed` (the character or connection is gone) and `linkDead` (it
 stays for Core's 60 seconds).
+
+**The kick message arrives.** Core sends queued packets at the end of each game-loop tick. Core's
+`/kick` queues the message and the quit packet, then closes the socket at once, so the kicked player
+never sees them. The op closes the connection half a second after queuing them; in the lab test the
+kicked client received both lines and the quit packet, then the socket closed 0.5 s later.
+
+**Kick mark.** `mark=true` shows the players around the kicked character what happened, for the 60
+seconds it stays link-dead:
+
+- once, "<name> has been kicked from the server." in their system window and in the middle of their
+  screen;
+- the character drawn as a ghost (model 1676), sent again every 3 seconds, so a player who comes
+  into view later sees it too (Core sends a newcomer the real model when the client asks for the
+  figure).
+
+Only packets to those players change: the character's model, name and guild are untouched and
+nothing is saved, and the ghost goes when Core removes the character. The ghost keeps the nameplate,
+guild line and the shield and weapon in hand. A player who can't see a stealthed character gets
+nothing. A GM or Admin character is stealthed from the moment it enters the world, so players never
+see it, and marking one shows them nothing. `mark` needs the link death, so it can't be combined
+with `force`.
 
 **Mute.** It works like `/mute`. A character mute is the in-memory `IsMuted` flag and ends at logout.
 An account mute sets `account.IsMuted` and saves the account. Core copies the account flag to each
@@ -80,10 +101,16 @@ through a [packet capture](admin-host-packets.md).
 | Forced kick of a link-dead player | A plain kick left LabChar link-dead; kicking again without `force` changed nothing (`linkDead: true`); `force=true` then removed it, and a login right after was granted |
 | Forced kick saves | LabChar moved with `player.move`, then force-kicked by account: the `dolcharacters` row had the new position |
 | Forced kick at the character screen | By account: `state: CharScreen`, `removed: true`; Core logged "just disconnected" at once |
+| Kick message delivered | The kicked client got the message twice and the quit packet (0xA4), then the socket closed 0.5 s later |
+| Kick mark | A second character (an ordinary player account) kicked with `mark=true`, watched by LabChar: the watcher got the kicked line in the system window and the centre of the screen once, and the ghost model (0xDB, 1676) at once and every 3 s after, 21 in all; they stopped when Core removed the character 60 s later. `force` with `mark` refused |
+| Kick mark, player arriving later | Watcher moved next to the kicked character 6 s after the kick: ghost packets for it arrived within 3.5 s |
+| Ghost on a retail client (packet.send, before the op existed) | Another player's figure drawn as a dark spectre, keeping its nameplate, guild line, shield and sword; Core removed it 60 s after a plain kick |
 | Refusals | Announce: an unknown style, a blank message, `realm=4`. Mute: no `muted`, both `name` and `account`, an unknown account. Kick: a character or account not online. Close: an account with no appeal |
 | Audit | One line per kick, mute, announce and close |
 
 Not tested: a real client (the `window` and `confirm` styles show as a window and a dialog there), a
 plain kick at the character screen, the appeal row's deletion at the periodic save, a forced kick of
 a dead player (the release), and a forced kick of a frozen client in a soft link death (the headless
-client keeps sending positions, so it can't reproduce one).
+client keeps sending positions, so it can't reproduce one). The kick mark itself, made by the op, on a
+retail client (the ghost was seen there only from `packet.send`), and a retail player arriving
+during the mark (the headless client doesn't ask the server for figures, so it never had one).

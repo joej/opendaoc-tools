@@ -1222,18 +1222,34 @@ namespace OpenDaocTools.Scripts
             ["state"] = c.ClientState.ToString(),
         };
 
+        // Packets reach the socket only at the end of a game-loop tick, so a disconnect in the same tick
+        // drops the kick message and the quit packet (Core's /kick has that problem). The kick closes
+        // the connection this long after queuing them.
+        private const int KickCloseDelayMs = 500;
+        // mark=true: for the 60 s link death, players in view see the kicked character as a ghost, and
+        // once, a line in the system window and in the middle of the screen.
+        private const ushort KickMarkModel = 1676; // ghost
+        private const int KickMarkResendMs = 3000; // also reaches players who come into view later
+        private const int KickMarkMaxMs = 90_000;
+
         private static object PlayerKick(Request req)
         {
             GameClient c = LoggedInClient(req, "a logged-in account");
             string message = OptStringArg(req, "message");
             bool force = BoolArg(req, "force", false);
+            bool mark = BoolArg(req, "mark", false);
+            if (force && mark)
+                throw new OpError("bad_request", "mark shows during the 60 s link death, which force=true skips: use one or the other");
             Dictionary<string, object> info = ClientInfo(c);
             GamePlayer p = c.Player;
-            bool inWorld = p != null && (c.ClientState is GameClient.eClientState.Playing or GameClient.eClientState.Linkdead);
+            bool linkDead = c.ClientState is GameClient.eClientState.Linkdead;
+            bool inWorld = p != null && (c.ClientState is GameClient.eClientState.Playing || linkDead);
+            if (mark && !inWorld)
+                throw new OpError("invalid", "mark needs a character in the world");
 
             // As /kick: the message in the system and chat windows, the quit packet, then the disconnect.
             // A link-dead client's socket is already closed, so it gets no packets.
-            if (c.ClientState is not GameClient.eClientState.Linkdead)
+            if (!linkDead)
             {
                 if (p != null)
                 {
@@ -1244,36 +1260,93 @@ namespace OpenDaocTools.Scripts
                 c.Out.SendPlayerQuit(true);
             }
 
-            bool removed;
-            if (force && inWorld)
-            {
-                // What Core's link-death timer does when its 60 s run out, now: release a dead player,
-                // save, then close the socket and remove the character (GameClient.LinkDeathQuit). This
-                // also ends a link death that never runs out, as when a frozen client keeps sending.
-                if (p.ObjectState == GameObject.eObjectState.Active)
-                {
-                    if (!p.IsAlive) p.Release(p.ReleaseType, true);
-                    CraftingProgressMgr.FlushAndSaveInstance(p);
-                    p.SaveIntoDatabase();
-                }
-                c.LinkDeathQuit();
-                removed = true;
-            }
+            if (p != null && !linkDead)
+                new ECSGameTimer(p, _ => { CloseKicked(c, p, force, inWorld, mark); return 0; }, KickCloseDelayMs);
             else
-            {
-                // A player in the world goes link-dead and quits 60 s later; at the character screen or
-                // while entering the world, Core removes the connection at once.
-                if (c.ClientState is not GameClient.eClientState.Linkdead) c.Disconnect();
-                removed = !inWorld;
-            }
+                CloseKicked(c, p, force, inWorld, mark);
 
+            bool removed = !inWorld || force;
             var after = new Dictionary<string, object>(info)
             {
                 ["kicked"] = true, ["forced"] = force, ["removed"] = removed,
-                ["linkDead"] = inWorld && !removed,
+                ["linkDead"] = inWorld && !removed, ["marked"] = mark,
             };
             Audit(req, new Dictionary<string, object>(info), null, after);
             return after;
+        }
+
+        private static void CloseKicked(GameClient c, GamePlayer p, bool force, bool inWorld, bool mark)
+        {
+            try
+            {
+                if (c.ClientState is GameClient.eClientState.Disconnected)
+                    return; // it quit by itself in the meantime
+                if (force && inWorld)
+                {
+                    // What Core's link-death timer does when its 60 s run out, now: release a dead player,
+                    // save, then close the socket and remove the character (GameClient.LinkDeathQuit). This
+                    // also ends a link death that never runs out, as when a frozen client keeps sending.
+                    if (p.ObjectState == GameObject.eObjectState.Active)
+                    {
+                        if (!p.IsAlive) p.Release(p.ReleaseType, true);
+                        CraftingProgressMgr.FlushAndSaveInstance(p);
+                        p.SaveIntoDatabase();
+                    }
+                    c.LinkDeathQuit();
+                    return;
+                }
+
+                // A player in the world goes link-dead and quits 60 s later; at the character screen or
+                // while entering the world, Core removes the connection at once.
+                if (c.ClientState is not (GameClient.eClientState.Linkdead or GameClient.eClientState.Disconnected))
+                    c.Disconnect();
+                if (mark && p.ObjectState == GameObject.eObjectState.Active)
+                    MarkKicked(p);
+                else if (mark)
+                    log.Info($"AdminHost: kick mark on {p.Name} skipped: {p.ObjectState}");
+            }
+            catch (Exception e)
+            {
+                log.Error("AdminHost: closing a kicked client failed", e);
+            }
+        }
+
+        // Only packets to the players in view: nothing about the character changes or is saved, and the
+        // ghost goes when Core removes the character. Players who can't see a stealthed one get nothing.
+        private static void MarkKicked(GamePlayer p)
+        {
+            string text = p.Name + " has been kicked from the server.";
+            var viewers = MarkViewers(p);
+            log.Info($"AdminHost: kick mark on {p.Name}: {viewers.Count} player(s) in view");
+            foreach (GamePlayer v in viewers)
+            {
+                v.Out.SendMessage(text, eChatType.CT_Important, eChatLoc.CL_SystemWindow);
+                v.Out.SendMessage(text, eChatType.CT_ScreenCenter, eChatLoc.CL_SystemWindow);
+            }
+            SendKickGhost(p);
+            long until = GameLoop.GameLoopTime + KickMarkMaxMs;
+            new ECSGameTimer(p, _ =>
+            {
+                if (p.ObjectState != GameObject.eObjectState.Active || GameLoop.GameLoopTime > until ||
+                    p.Client.ClientState is not GameClient.eClientState.Linkdead)
+                    return 0;
+                SendKickGhost(p);
+                return KickMarkResendMs;
+            }, KickMarkResendMs);
+        }
+
+        // Core's radius lookup fills a list pooled for the tick, so copy it before doing anything else.
+        // The stealth check is asked only for a stealthed character.
+        private static List<GamePlayer> MarkViewers(GamePlayer p)
+        {
+            var near = new List<GamePlayer>(p.GetPlayersInRadius(WorldMgr.VISIBILITY_DISTANCE));
+            bool stealthed = p.IsStealthed;            return near.Where(v => v != p && (!stealthed || v.CanDetect(p))).ToList();
+        }
+
+        private static void SendKickGhost(GamePlayer p)
+        {
+            foreach (GamePlayer v in MarkViewers(p))
+                v.Out.SendModelAndSizeChange(p, KickMarkModel, 0);
         }
 
         // muted=true|false. Without account=true or args.account it mutes the character until it logs
